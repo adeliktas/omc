@@ -211,7 +211,9 @@ def last_done(board: str):
 
 def findings():
     out = []
-    for name, url in (("backend", "http://127.0.0.1:8000/health"), ("frontend", "http://127.0.0.1:3000/")):
+    backend = os.environ.get("MC_URL", "http://127.0.0.1:8000").rstrip("/")
+    frontend = f"http://127.0.0.1:{os.environ.get('FRONTEND_PORT', '3000')}/"
+    for name, url in (("backend", backend + "/health"), ("frontend", frontend)):
         try:
             urllib.request.urlopen(url, timeout=10)
         except Exception as exc:  # noqa: BLE001
@@ -579,6 +581,11 @@ def main():
     if time.time() < state["next"] - 60:  # cron fires on the minute; "next" lands a second later
         return 0
     found = findings()
+    if os.environ.get("RUNNER_APPLY") != "1" and found:
+        # The fleet is disarmed on purpose (deploy/setup.sh step 7 found no coding harness), so
+        # there is no agent to act on findings: record them and spend no model run.
+        log(f"fleet disarmed (RUNNER_APPLY!=1); held {len(found)} finding(s): {found}")
+        found = []
     review = outcomes() if time.time() - state.get("reviewed_at", 0) > REVIEW_EVERY else []
     for f in review:  # once a day, each with fresh tries
         state.get("tries", {}).pop(fingerprint(f), None)
