@@ -21,6 +21,7 @@ never sees it. Back it up to keep an instance.
 | `COMPOSE_PROJECT_NAME` | `omc-<name>` |
 | `COMPOSE_PROFILES` | `omniroute` (runs the bundled OmniRoute) |
 | `FRONTEND_PORT`, `BACKEND_PORT`, `POSTGRES_PORT`, `REDIS_PORT`, `OMNIROUTE_PORT`, `OMNIROUTE_PORT2` | host ports, picked free at install |
+| `OMC_BIND_ADDR` | interface the UI, API and OmniRoute bind to; `127.0.0.1` (loopback only) unless you set `0.0.0.0` for LAN access |
 | `OMNIROUTE_IMAGE` | OmniRoute image tag (`omniroute:omc-local`, built by `omniroute/build.sh`) |
 | `AUTH_MODE`, `LOCAL_AUTH_TOKEN` | Mission Control login (`local` mode, generated 64-character token) |
 | `POSTGRES_PASSWORD` | database password (generated) |

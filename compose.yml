@@ -151,7 +151,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${OMC_BIND_ADDR:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
 
   frontend:
     restart: unless-stopped
@@ -176,7 +176,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${OMC_BIND_ADDR:-127.0.0.1}:${FRONTEND_PORT:-3000}:3000"
     develop:
       watch:
         # Rebuild frontend image when UI source or build config changes.
@@ -320,8 +320,8 @@ services:
       OMNIROUTE_CHAT_ADMISSION_HEALTHY_HEADROOM: "0"
       OMNIROUTE_CHAT_ADMISSION_QUEUE_MS: "60000"
     ports:
-      - "0.0.0.0:${OMNIROUTE_PORT:-20128}:20128"
-      - "0.0.0.0:${OMNIROUTE_PORT2:-20129}:20129"
+      - "${OMC_BIND_ADDR:-127.0.0.1}:${OMNIROUTE_PORT:-20128}:20128"
+      - "${OMC_BIND_ADDR:-127.0.0.1}:${OMNIROUTE_PORT2:-20129}:20129"
     volumes:
       - omniroute_data:/app/data
       - ${OMNIROUTE_PAYLOAD_RULES:-./data/etc/payloadRules.json}:/app/data/payloadRules.json:ro

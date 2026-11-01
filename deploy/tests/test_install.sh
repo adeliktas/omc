@@ -21,6 +21,10 @@ OMC_SS=$tmp/ss OMC_INSTANCE=t1 "$home/deploy/install.sh" --render-env-only >/dev
 [ "$(stat -c %a "$home/data")" = 700 ] || { echo "FAIL data mode"; fail=1; }
 grep -q '^FRONTEND_PORT=13001$' "$home/data/.env" || { echo "FAIL first port not picked"; fail=1; }
 grep -q '^COMPOSE_PROJECT_NAME=omc-t1$' "$home/data/.env" || { echo "FAIL project name"; fail=1; }
+# Nothing is exposed to the network by default: every published app port goes through the knob.
+[ "$(grep -c 'OMC_BIND_ADDR:-127.0.0.1' "$root/compose.yml")" -ge 4 ] || { echo "FAIL compose does not default to loopback"; fail=1; }
+grep -q '"0.0.0.0:' "$root/compose.yml" && { echo "FAIL compose publishes on 0.0.0.0 unconditionally"; fail=1; }
+grep -qx 'OMC_BIND_ADDR=127.0.0.1' "$home/data/.env" || { echo "FAIL rendered env lacks the loopback default"; fail=1; }
 [ "$(grep -c '@[A-Z_]*@' "$home/data/.env")" = 0 ] || { echo "FAIL unrendered placeholder"; fail=1; }
 tok=$(sed -n 's/^LOCAL_AUTH_TOKEN=//p' "$home/data/.env")
 [ ${#tok} -ge 50 ] || { echo "FAIL token shorter than 50"; fail=1; }

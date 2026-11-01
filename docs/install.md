@@ -68,21 +68,23 @@ Re-running install never regenerates `data/.env`.
 
 ### Reaching the instance from another machine
 
-The Compose services publish `FRONTEND_PORT`, `BACKEND_PORT` and the two OmniRoute ports on every
-interface; only Postgres and Redis stay on loopback. To use the UI from another machine, point the
-two origin settings at the address that machine uses:
+The UI, the API and OmniRoute bind to loopback by default (`OMC_BIND_ADDR=127.0.0.1`), so nothing on
+this host is exposed to the network. To use them from another machine, set the bind address and point
+the origin settings at the address that machine uses:
 
 ```bash
 # as the instance user, in ~/omc (192.0.2.10 is this host, 13000/13001 its ports)
-sed -i 's|^BASE_URL=.*|BASE_URL=http://192.0.2.10:13001|; \
+sed -i 's|^OMC_BIND_ADDR=.*|OMC_BIND_ADDR=0.0.0.0|; \
+        s|^BASE_URL=.*|BASE_URL=http://192.0.2.10:13001|; \
         s|^CORS_ORIGINS=.*|CORS_ORIGINS=http://192.0.2.10:13000|' data/.env
-docker compose up -d backend webhook-worker
+docker compose up -d
 ```
 
-`NEXT_PUBLIC_API_URL=auto` makes the browser call the backend on the host it loaded the UI from,
-using `BACKEND_PORT`, so nothing has to be rebuilt. A request without the bearer token is refused
-(401), but do not rely on that alone on a network you do not control: restrict the published ports
-with the host firewall.
+Without `OMC_BIND_ADDR` in `data/.env` (an instance installed before this key existed) Compose falls
+back to `127.0.0.1`. Postgres and Redis always stay on loopback. `NEXT_PUBLIC_API_URL=auto` makes the
+browser call the backend on the host it loaded the UI from, using `BACKEND_PORT`, so nothing has to be
+rebuilt. Requests without the bearer token are refused (401), but restrict the port to the networks
+you trust instead of relying on that alone.
 
 ## 3. Guided setup
 
