@@ -66,6 +66,24 @@ Install does six things:
 
 Re-running install never regenerates `data/.env`.
 
+### Reaching the instance from another machine
+
+The Compose services publish `FRONTEND_PORT`, `BACKEND_PORT` and the two OmniRoute ports on every
+interface; only Postgres and Redis stay on loopback. To use the UI from another machine, point the
+two origin settings at the address that machine uses:
+
+```bash
+# as the instance user, in ~/omc (192.0.2.10 is this host, 13000/13001 its ports)
+sed -i 's|^BASE_URL=.*|BASE_URL=http://192.0.2.10:13001|; \
+        s|^CORS_ORIGINS=.*|CORS_ORIGINS=http://192.0.2.10:13000|' data/.env
+docker compose up -d backend webhook-worker
+```
+
+`NEXT_PUBLIC_API_URL=auto` makes the browser call the backend on the host it loaded the UI from,
+using `BACKEND_PORT`, so nothing has to be rebuilt. A request without the bearer token is refused
+(401), but do not rely on that alone on a network you do not control: restrict the published ports
+with the host firewall.
+
 ## 3. Guided setup
 
 ```bash
