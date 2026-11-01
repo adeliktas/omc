@@ -62,6 +62,7 @@ from app.core.evidence_redaction import (evidence_name_valid, evidence_paths_con
     python_identifiers, redact_diff, redact_evidence)
 from mc_pi_runtime import qwen_slot  # noqa: E402 - runner paths are bootstrapped above
 from mc_skills import SKILLS_MOUNT, SUPERPOWERS, ponytail, superpowers, superpowers_index  # noqa: E402
+from mc_service import restart as service_restart  # noqa: E402
 from mc_task_budget import ApiError, check as check_task_budget, request
 
 MC = str(HERE / "mc")
@@ -2180,12 +2181,7 @@ class Cycle:
                 else f"DEPLOY FAILED {svc} (previous image restored)"
             )
         if "scripts/mc-claude-code-p.py" in changed:
-            ok = (
-                subprocess.run(
-                    ["rc-service", "mc-claude-code-p", "restart"], capture_output=True
-                ).returncode
-                == 0
-            )
+            ok = service_restart("mc-claude-code-p")
             report.append(
                 "restarted mc-claude-code-p"
                 if ok

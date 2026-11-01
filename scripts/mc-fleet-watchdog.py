@@ -31,6 +31,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from omc_paths import HOME, OMC_HOME, etc_path, load_fleet_config, lock_path, log_path, state_dir  # noqa: E402
+from mc_service import running as service_running  # noqa: E402
 
 STATE = state_dir("mc-fleet-watchdog") / "state.json"
 RUNS = state_dir("mc-fleet-watchdog") / "runs"
@@ -225,7 +226,7 @@ def findings():
     except BaseException as exc:  # noqa: BLE001 - the CLI exits on HTTP errors
         out.append(f"API/database unavailable: {type(exc).__name__}: {str(exc)[:150]}")
         return sorted(set(out))
-    if "started" not in subprocess.run(["rc-service", "mc-team-pool", "status"], capture_output=True, text=True).stdout:
+    if not service_running("mc-team-pool"):
         out.append("mc-team-pool service is not started")
     now = datetime.now(UTC)
     # Errors logged before the last Opus run ended predate its fix; recounting them paid
@@ -395,7 +396,7 @@ The cheap health check found these problems that stop fleet progress:
 Diagnose the root cause and fix it so the fleet resumes on its own:
 - First read {handoff} (shared with the other watchdog engine: Opus or gpt-6.1-sol, whichever has usage). Before you finish, update it: what you did, the current state, open threads and the next steps.
 {memory}- Relevant logs: {logs}. The MC checkout is {home} and the API CLI is scripts/mc.
-- Fix system bugs at the root in an isolated git worktree. Add a focused test, commit, fast-forward the checkout under {lock}, and deploy with scripts/mc-deploy.sh (backend|frontend) or `rc-service mc-team-pool restart` when the pool is idle.
+- Fix system bugs at the root in an isolated git worktree. Add a focused test, commit, fast-forward the checkout under {lock}, and deploy with scripts/mc-deploy.sh (backend|frontend) or by restarting the mc-team-pool service when the pool is idle.
 - Then re-admit affected tasks through the normal API. Never delete data, reset usage counters, read protected Jira/customer data, or change the Jetson or SGLang.
 - Look across tasks before fixing one: compare recent block reasons (`cd {home} && docker compose exec -T db psql -U postgres -d mission_control -c "select task_id, block_reason, updated_at from team_cycles where state='blocked' order by updated_at desc limit 60"`) and the escalation handoffs in {handoffs}. A shared cause beats N task-local fixes.
 - Never make a finding go away by exempting or narrowing a watchdog check, unless you prove the check itself is wrong and say so. The outcome checks (no progress, repeated block reasons, mass pauses) must stay.
