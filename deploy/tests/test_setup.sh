@@ -47,7 +47,7 @@ for c in crontab rc-service rc-update pgrep; do
   printf '#!/bin/sh\necho "%s $*" >> "$OMC_TEST_CALLS"\nexit 0\n' "$c" > "$tmp/bin/$c"
   chmod +x "$tmp/bin/$c"
 done
-out=$(PATH="$tmp/bin:$PATH" HOME="$tmp/no-harness-home" OMC_TEST_CALLS="$tmp/calls" "$home/deploy/setup.sh" --step 7 </dev/null 2>&1); rc=$?
+out=$(OMC_INIT=openrc PATH="$tmp/bin:$PATH" HOME="$tmp/no-harness-home" OMC_TEST_CALLS="$tmp/calls" "$home/deploy/setup.sh" --step 7 </dev/null 2>&1); rc=$?
 { [ $rc -eq 0 ] && grep -q 'OpenClaw/PEV' <<<"$out" && grep -qx 'RUNNER_APPLY=0' "$home/data/etc/fleet.env"; } || { echo "FAIL optional-free fleet setup: rc=$rc $out"; fail=1; }
 grep -q 'rc-service -U mc-team-pool stop' "$tmp/calls" || { echo 'FAIL missing optional harness did not stop coding pool'; fail=1; }
 grep -q 'rc-update.*add' "$tmp/calls" && { echo 'FAIL enabled coding services without a configured harness'; fail=1; }

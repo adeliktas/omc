@@ -126,7 +126,7 @@ done
 # 5. The user's rootless Docker as an init service: an OpenRC user service whose session is started
 #    by user.omc-<name>, or a systemd user unit made boot-safe with lingering.
 svc=$home/.config/rc
-uid=$(id -u "$user")
+uid=$(id -u "$user" 2>/dev/null || echo 1000)  # a dry run has no user yet
 userctl() { run runuser -u "$user" -- env "XDG_RUNTIME_DIR=/run/user/$uid" systemctl --user "$@"; }
 if [ "$(omc_init)" = systemd ]; then
   sysvc=$home/.config/systemd/user

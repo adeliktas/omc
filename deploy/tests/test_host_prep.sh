@@ -25,7 +25,7 @@ out=$(OMC_GETENT=$tmp/getent "$root/deploy/host-prep.sh" --dry-run 'Bad!' 2>&1);
 check "host-prep refuses an invalid name" '[ $rc -ne 0 ] && grep -q "invalid instance name" <<<"$out"'
 out=$(OMC_GETENT=$tmp/getent "$root/deploy/host-prep.sh" --dry-run zz9 2>&1); rc=$?
 check "dry run of a new name only prints" '[ $rc -eq 0 ] && grep -q "+ useradd" <<<"$out" && ! getent passwd omc-zz9 >/dev/null'
-out=$(OMC_GETENT=$tmp/getent OMC_REGISTRY=$tmp/instances "$root/deploy/host-prep.sh" --dry-run zz9 2>&1)
+out=$(OMC_INIT=openrc OMC_GETENT=$tmp/getent OMC_REGISTRY=$tmp/instances "$root/deploy/host-prep.sh" --dry-run zz9 2>&1)
 check "home writes run as the instance user" '[ "$(grep -c "runuser -u omc-zz9 --" <<<"$out")" -ge 4 ]'
 check "no root write into the home" '! grep -E "^\+ (install -d -o|chmod 0755 /home|chown (-h )?omc-zz9:omc-zz9 /home|ln -sfn \.\./\.\./init\.d)" <<<"$out"'
 # The systemd path renders a lingering user unit and leaves the OpenRC files alone.
