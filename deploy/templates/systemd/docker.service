@@ -2,6 +2,9 @@
 Description=Rootless Docker daemon for this OMC instance
 After=network-online.target
 Wants=network-online.target
+# Give up on a daemon that keeps crashing instead of restarting it forever.
+StartLimitBurst=3
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
@@ -16,8 +19,6 @@ LimitNPROC=infinity
 TasksMax=infinity
 Restart=always
 RestartSec=2
-StartLimitBurst=3
-StartLimitIntervalSec=60
 
 [Install]
 WantedBy=default.target
