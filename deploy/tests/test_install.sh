@@ -15,7 +15,11 @@ home=$tmp/omc; mkdir -p "$home"
 cp -r "$root/deploy" "$home/deploy"
 OMC_SS=$tmp/ss OMC_INSTANCE=t1 "$home/deploy/install.sh" --render-env-only >/dev/null || { echo "FAIL first render"; fail=1; }
 first=$(sha256sum "$home/data/.env" "$home/data/.env.omniroute" 2>&1)
+# The fleet's armed/disarmed state belongs to setup step 7; a re-run must not re-arm it.
+sed -i 's/^RUNNER_APPLY=.*/RUNNER_APPLY=0/' "$home/data/etc/fleet.env"
 OMC_SS=$tmp/ss OMC_INSTANCE=t1 "$home/deploy/install.sh" --render-env-only >/dev/null || { echo "FAIL second render"; fail=1; }
+grep -qx 'RUNNER_APPLY=0' "$home/data/etc/fleet.env" || { echo "FAIL re-run re-armed the fleet"; fail=1; }
+grep -q 'deploy/run.sh mc-fleet-watchdog.py' "$home/data/etc/crontab" || { echo "FAIL crontab not rendered"; fail=1; }
 [ "$first" = "$(sha256sum "$home/data/.env" "$home/data/.env.omniroute" 2>&1)" ] || { echo "FAIL .env changed on re-run"; fail=1; }
 [ "$(stat -c %a "$home/data/.env")" = 600 ] || { echo "FAIL .env mode"; fail=1; }
 [ "$(stat -c %a "$home/data")" = 700 ] || { echo "FAIL data mode"; fail=1; }

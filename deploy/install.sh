@@ -41,6 +41,14 @@ fi
 [ -f "$data/etc/payloadRules.json" ] || cp "$here/templates/payloadRules.json" "$data/etc/payloadRules.json"
 ln -sfn data/.env "$home/.env"
 ln -sfn data/.env.omniroute "$home/.env.omniroute"
+# The crontab and fleet.env are plain renders, so they happen before any Docker work. fleet.env is
+# rendered only once: deploy/setup.sh step 7 owns its armed/disarmed state (RUNNER_APPLY), and a
+# re-run must not silently re-arm a disarmed fleet.
+for f in crontab fleet.env; do
+  if [ "$f" = fleet.env ] && [ -f "$data/etc/$f" ]; then continue; fi
+  sed "s|@OMC_HOME@|$home|g; s|@OMC_DATA@|$data|g; s|@DOCKER_HOST@|${DOCKER_HOST:-unix:///run/user/$(id -u)/docker.sock}|g; s|@HOME@|$HOME|g" \
+    "$here/templates/$f" > "$data/etc/$f"
+done
 [ "${1:-}" = --render-env-only ] && { echo "install: $data/.env ready"; exit 0; }
 
 [ "$(id -u)" != 0 ] || die "do not run as root"
@@ -61,7 +69,7 @@ docker compose up -d --build
 docker image prune -f >/dev/null
 docker builder prune -af >/dev/null
 
-# Fleet services and crontab are rendered here and started by deploy/setup.sh (step 7).
+# Fleet services are rendered here and started by deploy/setup.sh (step 7).
 case $(omc_init) in
   systemd)
     svc=$HOME/.config/systemd/user
@@ -81,10 +89,6 @@ case $(omc_init) in
     done
     ;;
 esac
-for f in crontab fleet.env; do
-  sed "s|@OMC_HOME@|$home|g; s|@OMC_DATA@|$data|g; s|@DOCKER_HOST@|$DOCKER_HOST|g; s|@HOME@|$HOME|g" \
-    "$here/templates/$f" > "$data/etc/$f"
-done
 
 for _ in $(seq 100); do
   curl -fsS -o /dev/null "http://127.0.0.1:$BACKEND_PORT/health" &&

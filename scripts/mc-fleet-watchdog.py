@@ -233,17 +233,18 @@ def findings():
     # for a second, idle Opus run (2026-10-22). Run files are last written at run end.
     fixed_at = max((p.stat().st_mtime for p in RUNS.glob("*.json")), default=0)
     recent, fresh = [], []
-    with POOL_LOG.open(errors="replace") as f:
-        f.seek(max(0, POOL_LOG.stat().st_size - 2_000_000))
-        for line in f:
-            m = re.match(r"(\S+) (.*)", line)
-            try:
-                if m and now - ts(m[1]) < timedelta(minutes=45):
-                    recent.append(m[2])
-                    if ts(m[1]).timestamp() > fixed_at:
-                        fresh.append(m[2])
-            except ValueError:
-                pass
+    if POOL_LOG.exists():  # a fresh instance may never have run the pool
+        with POOL_LOG.open(errors="replace") as f:
+            f.seek(max(0, POOL_LOG.stat().st_size - 2_000_000))
+            for line in f:
+                m = re.match(r"(\S+) (.*)", line)
+                try:
+                    if m and now - ts(m[1]) < timedelta(minutes=45):
+                        recent.append(m[2])
+                        if ts(m[1]).timestamp() > fixed_at:
+                            fresh.append(m[2])
+                except ValueError:
+                    pass
     # An engine hold is a wait (the runner says so too). The drive loop's iteration limit
     # is also a wait (shared engine slots, a quota reset, a sibling's lease): the pool just
     # restarts the runner. Neither line is worth Opus; an attempt that is never claimed
