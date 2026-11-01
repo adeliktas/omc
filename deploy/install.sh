@@ -62,12 +62,25 @@ docker image prune -f >/dev/null
 docker builder prune -af >/dev/null
 
 # Fleet services and crontab are rendered here and started by deploy/setup.sh (step 7).
-svc=$HOME/.config/rc/init.d
-mkdir -p "$svc"
-for s in mc-team-pool mc-review-agent openclaw-gateway; do
-  sed "s|@OMC_HOME@|$home|g; s|@OMC_DATA@|$data|g" "$here/templates/openrc/$s" > "$svc/$s"
-  chmod 755 "$svc/$s"
-done
+case $(omc_init) in
+  systemd)
+    svc=$HOME/.config/systemd/user
+    mkdir -p "$svc/default.target.wants"
+    for s in mc-team-pool mc-review-agent openclaw-gateway; do
+      sed "s|@OMC_HOME@|$home|g; s|@OMC_DATA@|$data|g; s|@HOME@|$HOME|g" \
+        "$here/templates/systemd/$s.service" > "$svc/$s.service"
+    done
+    env "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" systemctl --user daemon-reload >/dev/null 2>&1 || true
+    ;;
+  *)
+    svc=$HOME/.config/rc/init.d
+    mkdir -p "$svc"
+    for s in mc-team-pool mc-review-agent openclaw-gateway; do
+      sed "s|@OMC_HOME@|$home|g; s|@OMC_DATA@|$data|g" "$here/templates/openrc/$s" > "$svc/$s"
+      chmod 755 "$svc/$s"
+    done
+    ;;
+esac
 for f in crontab fleet.env; do
   sed "s|@OMC_HOME@|$home|g; s|@OMC_DATA@|$data|g; s|@DOCKER_HOST@|$DOCKER_HOST|g; s|@HOME@|$HOME|g" \
     "$here/templates/$f" > "$data/etc/$f"

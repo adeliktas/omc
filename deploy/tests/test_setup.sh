@@ -51,5 +51,16 @@ out=$(PATH="$tmp/bin:$PATH" HOME="$tmp/no-harness-home" OMC_TEST_CALLS="$tmp/cal
 { [ $rc -eq 0 ] && grep -q 'OpenClaw/PEV' <<<"$out" && grep -qx 'RUNNER_APPLY=0' "$home/data/etc/fleet.env"; } || { echo "FAIL optional-free fleet setup: rc=$rc $out"; fail=1; }
 grep -q 'rc-service -U mc-team-pool stop' "$tmp/calls" || { echo 'FAIL missing optional harness did not stop coding pool'; fail=1; }
 grep -q 'rc-update.*add' "$tmp/calls" && { echo 'FAIL enabled coding services without a configured harness'; fail=1; }
+# The same step on systemd reaches the user manager, never rc-*.
+for c in crontab systemctl pgrep; do
+  printf '#!/bin/sh\necho "%s $*" >> "$OMC_TEST_CALLS"\nexit 0\n' "$c" > "$tmp/bin/$c"
+  chmod +x "$tmp/bin/$c"
+done
+printf 'RUNNER_APPLY=1\n' > "$home/data/etc/fleet.env"
+out=$(OMC_INIT=systemd PATH="$tmp/bin:$PATH" HOME="$tmp/no-harness-home" OMC_TEST_CALLS="$tmp/calls2" "$home/deploy/setup.sh" --step 7 </dev/null 2>&1); rc=$?
+{ [ $rc -eq 0 ] && grep -qx 'RUNNER_APPLY=0' "$home/data/etc/fleet.env"; } || { echo "FAIL systemd fleet disarm: rc=$rc $out"; fail=1; }
+grep -q 'systemctl --user stop mc-team-pool' "$tmp/calls2" || { echo 'FAIL systemd path did not stop the coding pool'; fail=1; }
+grep -q 'systemctl --user disable mc-team-pool' "$tmp/calls2" || { echo 'FAIL systemd path did not disable the coding pool'; fail=1; }
+grep -q 'rc-service' "$tmp/calls2" && { echo 'FAIL systemd path called rc-service'; fail=1; }
 [ "$fail" = 0 ] && echo "PASS setup"
 exit "$fail"

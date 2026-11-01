@@ -1,0 +1,18 @@
+[Unit]
+Description=OMC team-cycle pool supervisor
+After=default.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=@OMC_HOME@
+Environment=OMC_HOME=@OMC_HOME@
+Environment=OMC_DATA=@OMC_DATA@
+Environment=PATH=@HOME@/.local/bin:@HOME@/.local/node/bin:@HOME@/.pi/agent/bin:/usr/local/bin:/usr/bin:/bin
+# Same gate as the OpenRC start_pre: a disarmed fleet leaves this unit inactive, not restarting.
+ExecCondition=/bin/bash -c '. @OMC_DATA@/.env; . @OMC_DATA@/etc/fleet.env; [ "$RUNNER_APPLY" = 1 ]'
+ExecStart=/bin/bash @OMC_HOME@/deploy/service-exec.sh mc-team-pool.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

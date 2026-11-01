@@ -1,0 +1,20 @@
+[Unit]
+Description=OMC OpenClaw gateway
+After=default.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=@OMC_HOME@
+Environment=OMC_HOME=@OMC_HOME@
+Environment=OMC_DATA=@OMC_DATA@
+Environment=PATH=@HOME@/.local/bin:@HOME@/.local/node/bin:@HOME@/.pi/agent/bin:/usr/local/bin:/usr/bin:/bin
+# Core gateway of this instance; uses only the instance user's existing OpenClaw config.
+ExecCondition=/bin/sh -c 'test -x "$HOME/.local/bin/openclaw" && test -f "$HOME/.openclaw/openclaw.json"'
+ExecStart=@HOME@/.local/bin/openclaw gateway
+StandardOutput=append:@OMC_DATA@/log/openclaw-gateway.log
+StandardError=append:@OMC_DATA@/log/openclaw-gateway.log
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

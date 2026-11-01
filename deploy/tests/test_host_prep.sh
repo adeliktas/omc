@@ -28,5 +28,9 @@ check "dry run of a new name only prints" '[ $rc -eq 0 ] && grep -q "+ useradd" 
 out=$(OMC_GETENT=$tmp/getent OMC_REGISTRY=$tmp/instances "$root/deploy/host-prep.sh" --dry-run zz9 2>&1)
 check "home writes run as the instance user" '[ "$(grep -c "runuser -u omc-zz9 --" <<<"$out")" -ge 4 ]'
 check "no root write into the home" '! grep -E "^\+ (install -d -o|chmod 0755 /home|chown (-h )?omc-zz9:omc-zz9 /home|ln -sfn \.\./\.\./init\.d)" <<<"$out"'
+# The systemd path renders a lingering user unit and leaves the OpenRC files alone.
+sysout=$(OMC_INIT=systemd OMC_GETENT=$tmp/getent OMC_REGISTRY=$tmp/instances-systemd "$root/deploy/host-prep.sh" --dry-run zz9 2>&1)
+check "systemd renders a lingering user unit" 'grep -q "+ loginctl enable-linger omc-zz9" <<<"$sysout" && grep -q "systemd/user/docker.service" <<<"$sysout"'
+check "systemd leaves openrc alone" '! grep -q "/etc/init.d/user.omc-zz9" <<<"$sysout" && ! grep -q "rc-update add" <<<"$sysout"'
 [ "$fail" = 0 ] && echo "PASS host-prep"
 exit "$fail"

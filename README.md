@@ -29,8 +29,8 @@ For how the pieces fit together, see [architecture](docs/architecture/README.md#
 
 ## Install
 
-The supported target is Gentoo Linux with OpenRC and rootless Docker. Each deployment is an
-isolated, named instance:
+The supported targets are Gentoo Linux with OpenRC and Debian/Ubuntu with systemd, both with
+rootless Docker. Each deployment is an isolated, named instance:
 - its own unprivileged user and home;
 - its own Docker daemon, ports and `data/` directory;
 - it can be removed completely without affecting other instances.

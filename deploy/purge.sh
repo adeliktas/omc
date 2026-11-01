@@ -20,12 +20,23 @@ entry=$(${OMC_GETENT:-getent} passwd "$user")
 uid=$(cut -d: -f3 <<<"$entry")
 home=$(cut -d: -f6 <<<"$entry")
 ports=$(grep -hE '^[A-Z0-9_]*PORT[0-9]*=[0-9]+$' "$home"/omc/data/.env 2>/dev/null | cut -d= -f2 | tr '\n' ' ' || true)
+init=$(omc_init)
 
 run su - "$user" -c 'cd ~/omc 2>/dev/null && docker compose down -v --rmi all --remove-orphans' || true
 run su - "$user" -c 'crontab -r' || true
-run rc-service "user.$user" stop || true
-run rc-update del "user.$user" default || true
-run rm -f "/etc/init.d/user.$user" "/etc/conf.d/user.$user"
+if [ "$init" = systemd ]; then
+  run runuser -u "$user" -- env "XDG_RUNTIME_DIR=/run/user/$uid" systemctl --user stop \
+    mc-team-pool mc-review-agent openclaw-gateway docker || true
+  run rm -f "$home"/.config/systemd/user/mc-team-pool.service \
+    "$home"/.config/systemd/user/mc-review-agent.service \
+    "$home"/.config/systemd/user/openclaw-gateway.service \
+    "$home"/.config/systemd/user/docker.service
+  run loginctl disable-linger "$user" || true
+else
+  run rc-service "user.$user" stop || true
+  run rc-update del "user.$user" default || true
+  run rm -f "/etc/init.d/user.$user" "/etc/conf.d/user.$user"
+fi
 run pkill -KILL -U "$uid" || true
 run sed -i "/^$user:/d" /etc/subuid /etc/subgid
 [ -f "${OMC_REGISTRY:-/etc/omc/instances}" ] && run sed -i "/^$name /d" "${OMC_REGISTRY:-/etc/omc/instances}"
@@ -38,7 +49,12 @@ pgrep -U "$uid" >/dev/null && left+=("processes of uid $uid")
 for p in $ports; do [ -n "$(ss -Htln "sport = :$p")" ] && left+=("port $p"); done
 getent passwd "$user" >/dev/null && left+=("passwd entry")
 grep -qs "^$user:" /etc/subuid /etc/subgid && left+=("subuid/subgid line")
-[ -e "/etc/init.d/user.$user" ] && left+=("/etc/init.d/user.$user")
+if [ "$init" = systemd ]; then
+  [ -e "$home/.config/systemd/user" ] && left+=("$home/.config/systemd/user")
+  loginctl show-user "$user" --property=Linger 2>/dev/null | grep -q 'Linger=yes' && left+=("lingering")
+else
+  [ -e "/etc/init.d/user.$user" ] && left+=("/etc/init.d/user.$user")
+fi
 [ -e "/var/spool/cron/crontabs/$user" ] && left+=("crontab")
 [ -e "$home" ] && left+=("$home")
 [ ${#left[@]} -eq 0 ] || die "leftovers: ${left[*]}"

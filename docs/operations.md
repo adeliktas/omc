@@ -7,13 +7,22 @@ All commands below run as the instance user, in `~/omc`, unless marked **root**.
 | What | How it runs | Log |
 |---|---|---|
 | Postgres, Redis, backend, frontend, webhook worker, OmniRoute | Docker Compose on the user's rootless daemon | `docker compose logs <service>` |
-| rootless Docker | OpenRC user service `dockerd` | `~/.local/state/dockerd.log` |
-| OpenClaw core gateway | OpenRC user service `openclaw-gateway` (after installing/configuring OpenClaw) | `data/log/openclaw-gateway.log` |
-| team pool | OpenRC user service `mc-team-pool` | `data/log/mc-claude-runner.log` |
-| review agent | OpenRC user service `mc-review-agent` | `data/log/mc-review-agent.log` |
+| rootless Docker | user service `dockerd`: `systemctl --user` on Debian, OpenRC `dockerd` on Gentoo | `~/.local/state/dockerd.log` |
+| OpenClaw core gateway | user service `openclaw-gateway` (after installing/configuring OpenClaw) | `data/log/openclaw-gateway.log` |
+| team pool | user service `mc-team-pool` | `data/log/mc-claude-runner.log` |
+| review agent | user service `mc-review-agent` | `data/log/mc-review-agent.log` |
 | watchdog, GitHub responder, next batch, quota balancer, disk janitor | the user's crontab, through `deploy/run.sh` | `data/log/<script>.log` |
 
-User services:
+User services, on systemd (Debian/Ubuntu):
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+systemctl --user list-units 'mc-*' 'docker.service' 'openclaw-gateway.service'
+systemctl --user status openclaw-gateway
+systemctl --user restart mc-team-pool
+```
+
+The same units on Gentoo/OpenRC:
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
@@ -22,12 +31,13 @@ rc-service -U openclaw-gateway status
 rc-service -U mc-team-pool restart
 ```
 
-On the host, `rc-service user.omc-<name> start` or `stop` (as **root**) starts or stops the whole
-instance session.
+On the host (as **root**), `loginctl disable-linger`/`systemctl --user stop docker` on Debian or
+`rc-service user.omc-<name> start`/`stop` on Gentoo starts or stops the whole instance session.
 
-The `openclaw-gateway` template uses this user's `~/.local/bin/openclaw` and existing
+The `openclaw-gateway` service uses this user's `~/.local/bin/openclaw` and existing
 `~/.openclaw/openclaw.json`. After configuring the gateway, enable/start it with
-`rc-update -U add openclaw-gateway default` and `rc-service -U openclaw-gateway start`.
+`systemctl --user enable --now openclaw-gateway` on Debian, or
+`rc-update -U add openclaw-gateway default` and `rc-service -U openclaw-gateway start` on Gentoo.
 If it is already running by hand, stop only that instance user's gateway before starting its
 managed service; do not kill another user's processes. A tmux setup session is not a replacement
 for runtime service management.

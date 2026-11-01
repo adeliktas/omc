@@ -18,6 +18,10 @@ node_modules/
 # Worktrees
 .worktrees/
 
+# Agent scratch: goal state and ad-hoc scripts, never part of a deployment
+.pi/
+.work/
+
 # Accidental literal "~" directories (e.g. when a configured path contains "~" but isn't expanded)
 backend/~/
 backend/coverage.*

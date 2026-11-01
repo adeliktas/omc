@@ -1,5 +1,33 @@
 # Shared helpers for the OMC deploy scripts (sourced, not executed).
 
+# Host family, which decides the package names: debian (Debian/Ubuntu) or gentoo.
+omc_os() { [ -f /etc/debian_version ] && echo debian || echo gentoo; }
+
+# Which init supervises this instance's user services: systemd or openrc. OMC_INIT overrides the
+# detection (the deploy tests use it to run both paths on one host).
+omc_init() {
+  if [ -n "${OMC_INIT:-}" ]; then echo "$OMC_INIT"; return; fi
+  [ -d /run/systemd/system ] && echo systemd || echo openrc
+}
+
+# The one place that names an init command: start/stop/status/enable/disable one user service,
+# run as the instance user. systemd user units are reached through the caller's session runtime dir.
+omc_svc() {
+  local action=$1 name=$2 runtime="XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [ "$(omc_init)" = systemd ]; then
+    case $action in
+      start|stop|status|enable|disable) env "$runtime" systemctl --user "$action" "$name" ;;
+      *) echo "omc_svc: unknown action '$action'" >&2; return 2 ;;
+    esac
+    return
+  fi
+  case $action in
+    enable)  rc-update -U add "$name" default ;;
+    disable) rc-update -U del "$name" default ;;
+    *)       rc-service -U "$name" "$action" ;;
+  esac
+}
+
 # An instance name: lowercase letter, then up to 11 lowercase letters/digits (user: omc-<name>).
 omc_valid_name() { [[ ${1:-} =~ ^[a-z][a-z0-9]{0,11}$ ]]; }
 

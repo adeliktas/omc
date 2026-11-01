@@ -11,21 +11,24 @@ Instances never share state. Each one can be removed completely with `deploy/pur
 
 ## Requirements
 
-Requirements are the same Gentoo stack OMC is developed on:
+Requirements are one of two supported stacks, both with rootless Docker:
 
-- **System:** Gentoo Linux with OpenRC 0.63 or newer.
-- **Packages:**
-  - `app-containers/docker`, version 29 or newer;
-  - `sys-apps/shadow`, for `newuidmap`;
-  - `sys-apps/bubblewrap`;
-  - `app-containers/slirp4netns`;
-  - `dev-vcs/git`;
-  - `net-misc/curl`;
-  - Python 3.12 or newer.
+- **Gentoo:** Gentoo Linux with OpenRC 0.63 or newer.
+- **Debian/Ubuntu:** Debian 13 (trixie) or newer with systemd 257 or newer.
+
+Packages:
+
+- `docker`, version 29 or newer. On Debian, `docker.io` is older, so install `docker-ce` from
+  Docker's own repository first; `host-prep.sh` does not add apt repositories.
+- `newuidmap` (`sys-apps/shadow` / `uidmap`);
+- `bubblewrap`;
+- `slirp4netns`;
+- `git`, `curl`, `cron`, `util-linux` (`flock`), `procps` (`pgrep`);
+- Python 3.12 or newer.
 - **Hardware:** about 8 GB of free RAM for the image builds, and 20 GB of disk per instance.
 
-`deploy/host-prep.sh` lists anything missing. With `--install-packages` it installs them through
-`emerge --noreplace`.
+`deploy/host-prep.sh` probes them all and lists anything missing. With `--install-packages` it
+installs them with `emerge --noreplace` on Gentoo and `apt-get install` on Debian.
 
 ## 1. Prepare the host (root, once per instance)
 
@@ -40,7 +43,8 @@ Host prep does the following, and nothing else on the host:
 2. It assigns a subordinate uid and gid range.
 3. It installs Docker's static rootless extras (`rootlesskit`) for the host's Docker version under
    `/opt/omc/rootless-extras/`.
-4. It starts the user's own rootless Docker daemon as an OpenRC user service (`user.omc-demo`).
+4. It starts the user's own rootless Docker daemon: an OpenRC user service (`user.omc-demo`) on
+   Gentoo, a lingering systemd user unit (`docker.service`) on Debian.
 5. It enables that service for future boots. No reboot is needed.
 
 ## 2. Install (as the instance user)
@@ -140,7 +144,7 @@ deploy/purge.sh demo        # as root
 
 Purge stops and removes everything that belongs to the instance:
 
-- its services, containers, volumes and images;
+- its services (`systemctl --user`, or the OpenRC user service), containers, volumes and images;
 - its crontab and subuid lines;
 - the user and its home directory.
 

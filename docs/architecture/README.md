@@ -129,9 +129,9 @@ checkout:
 
 | Process | Runs as | What it does |
 |---|---|---|
-| `scripts/mc-team-pool.py` | OpenRC service | Admits team tasks, schedules cycles and re-admits a blocked task at most twice. A third failure pauses the task, raises a `/review` item and opens one `[meta-debug]` task on the operations board. |
+| `scripts/mc-team-pool.py` | user service (`mc-team-pool`) | Admits team tasks, schedules cycles and re-admits a blocked task at most twice. A third failure pauses the task, raises a `/review` item and opens one `[meta-debug]` task on the operations board. |
 | `scripts/mc-team-runner.py` | Started by the pool | Runs PM → developer and specialists → independent QA → publication. Harness runs go through a `bwrap` sandbox. Every prompt starts with the ponytail rules, and coding roles also get a role-specific superpowers skill index. |
-| `scripts/mc-review-agent.py` | OpenRC service | Accepts routine published work independently. |
+| `scripts/mc-review-agent.py` | user service (`mc-review-agent`) | Accepts routine published work independently. |
 | `scripts/mc-fleet-watchdog.py` | cron, every 10 min, backing off to 4 h | Runs scripted outcome checks. A finding starts a frontier coding agent to repair the system. When that engine is out of quota, a second engine continues from a shared handoff file. |
 | `scripts/omc-github-responder.py` | cron, every 2 min | Answers human comments on the mapped GitHub repo. Change requests become board tasks. |
 | `scripts/omc-next-batch.py` | cron, every 15 min | Closes a settled `[backlog]` lead task and seeds the next batch from open issues. When the backlog is drained, it starts the intake, at most every 12 h. |

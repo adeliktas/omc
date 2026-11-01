@@ -1,12 +1,13 @@
 # Deployment
 
-> **Generic upstream deployment guide (single host, Docker Compose).** The supported OMC install, for Gentoo with OpenRC and rootless Docker as isolated named instances, is the instance installer under `deploy/`. Checked against Compose, entrypoint and shipped init examples, not deployed here. See the current-state snapshot for the reviewed Gentoo/OpenRC host, canonical production path and unresolved public TLS mismatch. These examples do not authorize service/configuration/data changes.
+> **Generic upstream deployment guide (single host, Docker Compose).** The supported OMC install, for Gentoo with OpenRC or Debian/Ubuntu with systemd, and rootless Docker as isolated named instances, is the instance installer under `deploy/`. Checked against Compose, entrypoint and shipped init examples, not deployed here. See the current-state snapshot for the reviewed Gentoo/OpenRC host, canonical production path and unresolved public TLS mismatch. These examples do not authorize service/configuration/data changes.
 
 > **The live deployment is documented in nuc-host.md.** The instructions below
-> are upstream's generic single-host guide; the production host runs OpenRC (no systemd),
+> are upstream's generic single-host guide; the reviewed production host runs OpenRC, and a
+> systemd host is installed by the same installer (`deploy/`) with systemd user units,
 > a host-process gateway, and the `omniroute` compose profile.
 
-## Supported OMC installation (Gentoo/OpenRC)
+## Supported OMC installation (Gentoo/OpenRC or Debian/systemd)
 
 Follow the [instance install guide](../install.md). From the repo root, `./install.sh` dispatches
 by privilege:
@@ -15,7 +16,8 @@ by privilege:
 - As `omc-demo`, in its own clone: `./install.sh` runs `deploy/install.sh`.
 - Then `deploy/setup.sh` guides onboarding and enables the fleet.
 
-This flow uses rootless Docker and OpenRC user services. Configuration and secrets stay under
+This flow uses rootless Docker and the host init for user services: OpenRC on Gentoo, systemd user
+units with lingering on Debian. Configuration and secrets stay under
 `data/`; do not create a regular root `.env` in an instance checkout. The generic manual examples
 below are not the instance installer and must not be mixed into its checkout.
 
@@ -134,7 +136,8 @@ This section is intentionally minimal until we standardize a recommended proxy (
 
 ## Run at boot (local install)
 
-The supported OMC installer uses OpenRC user services and rootless Docker (see the
+The supported OMC installer uses rootless Docker and the host's init for user services: OpenRC user
+services on Gentoo, systemd user units on Debian (see the
 [install guide](../install.md)). The former upstream `install.sh --mode local` is no longer
 available. The systemd and launchd examples below are retained only for unsupported manual,
 non-Docker deployments; they are not configured or tested by the OMC installer.

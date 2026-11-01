@@ -1,0 +1,23 @@
+[Unit]
+Description=Rootless Docker daemon for this OMC instance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@EXTRAS@/dockerd-rootless.sh
+Environment=PATH=@EXTRAS@:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+# Containers need their own cgroups; without delegation the daemon runs but cannot manage them.
+Delegate=yes
+KillMode=mixed
+LimitNOFILE=infinity
+LimitNPROC=infinity
+TasksMax=infinity
+Restart=always
+RestartSec=2
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+[Install]
+WantedBy=default.target
