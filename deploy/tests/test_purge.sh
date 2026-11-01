@@ -14,8 +14,9 @@ for name in root alice nosuch x 'Bad!'; do
 done
 [ "$before" = "$(sha256sum /etc/passwd /etc/subuid /etc/subgid)" ] || { echo "FAIL host files changed"; fail=1; }
 touch "$tmp/home-x/.omc-instance"
-out=$(OMC_GETENT=$tmp/getent "$root/deploy/purge.sh" --dry-run x 2>&1); rc=$?
+out=$(OMC_INIT=openrc OMC_GETENT=$tmp/getent "$root/deploy/purge.sh" --dry-run x 2>&1); rc=$?
 if [ $rc -ne 0 ] || ! grep -q "+ userdel -r omc-x" <<<"$out"; then echo "FAIL dry run of a real instance: $out"; fail=1; fi
+if grep -q '/etc/init.d/user.omc-x' <<<"$out"; then :; else echo "FAIL openrc purge dropped the session service"; fail=1; fi
 # On systemd the instance's units and its lingering user manager go as well.
 out=$(OMC_INIT=systemd OMC_GETENT=$tmp/getent "$root/deploy/purge.sh" --dry-run x 2>&1); rc=$?
 if [ $rc -ne 0 ] || ! grep -q 'systemctl --user stop' <<<"$out" || ! grep -q 'loginctl disable-linger omc-x' <<<"$out"; then
