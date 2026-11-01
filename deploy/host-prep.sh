@@ -133,8 +133,12 @@ if [ "$(omc_init)" = systemd ]; then
   as_user mkdir -p "$sysvc/default.target.wants"
   sed "s|@EXTRAS@|$extras|g" "$here/templates/systemd/docker.service" |
     as_user sh -c 'cat > "$1" && chmod 0644 "$1"' _ "$sysvc/docker.service"
-  # A lingering user manager starts the daemon at boot, with nobody logged in.
+  # A lingering user manager starts asynchronously, so wait for its bus before talking to it.
   run loginctl enable-linger "$user"
+  for _ in $(seq 30); do
+    if [ "$dry" = 1 ] || [ -S "/run/user/$uid/bus" ]; then break; fi
+    sleep 1
+  done
   userctl enable docker
   userctl start docker
 else
@@ -153,9 +157,7 @@ if [ "$(omc_init)" = openrc ]; then
   run rc-service "user.$user" start
 fi
 # Recovers a dockerd that failed its first start; the session may already be starting it.
-if [ "$(omc_init)" = systemd ]; then
-  userctl start docker >/dev/null 2>&1 || true
-else
+if [ "$(omc_init)" = openrc ]; then
   run su - "$user" -c "rc-service -U dockerd status >/dev/null 2>&1 || rc-service -U dockerd start" || true
 fi
 
