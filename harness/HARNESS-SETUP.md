@@ -80,10 +80,13 @@ runs the board's OpenClaw agents.
 `openclaw` 2026.9.4.
 
 ### Install
-OpenClaw needs Node.js 22 or newer: `emerge net-libs/nodejs`, or unpack the official Linux
-binary tarball from nodejs.org into `~/.local/node` and put its `bin/` on your `PATH`.
+OpenClaw 2026.9.4 needs Node.js 24.16 or newer: its own install script refuses Node 22
+(`this OpenClaw release requires Node >=24.16.0`), so check `node --version` before installing and
+unpack the official Linux binary tarball from nodejs.org into `~/.local/node` with its `bin/` on your
+`PATH` when the host's Node is older.
 
 ```bash
+node --version                       # must be >= 24.16
 npm install -g --prefix ~/.local openclaw@2026.9.4
 ```
 
