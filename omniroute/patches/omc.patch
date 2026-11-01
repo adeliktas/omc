@@ -1,0 +1,2413 @@
+diff --git a/Dockerfile b/Dockerfile
+index a35f57e28..db6e0c8ce 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -8,11 +8,9 @@ WORKDIR /app
+ # that already have a fix published in trixie. CVEs without an upstream fix yet
+ # (local-only TOCTOU, etc.) remain until the distro patches them and the image
+ # is rebuilt; none are reachable from the proxy's request surface at runtime.
+-RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
+-  --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+-  apt-get update \
++RUN  apt-get update \
+   && apt-get upgrade -y \
+-  && apt-get install -y --no-install-recommends libsecret-1-0 ca-certificates \
++  && apt-get install -y --no-install-recommends libsecret-1-0 libsecret-1-dev pkg-config ca-certificates build-essential python3 \
+   && rm -rf /var/lib/apt/lists/*
+ 
+ # npm's *bundled* node_modules (brace-expansion, ip-address, tar, undici) are
+@@ -67,9 +65,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
+ 
+ # Build tools for native module compilation
+ # apt-get update needed here because base's rm -rf clears the shared cache
+-RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
+-  --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+-  apt-get update \
++RUN  apt-get update \
+   && apt-get install -y --no-install-recommends python3 make g++ \
+   && rm -rf /var/lib/apt/lists/*
+ 
+@@ -93,43 +89,24 @@ ENV NPM_CONFIG_LEGACY_PEER_DEPS=true
+ # are reproducible.
+ RUN test -f package-lock.json \
+   || (echo "package-lock.json is required for reproducible Docker builds" >&2 && exit 1)
+-# `npm rebuild <pkg>` re-runs the package's own install script, so under npm 11 +
+-# `--ignore-scripts` on the parent `npm ci` it depends on npm's script-allowlist
+-# machinery correctly re-enabling that one package's script. Some self-hosted build
+-# environments (e.g. Dokploy) hit a broken/incomplete better-sqlite3 native binding
+-# from that indirection. Invoking `node-gyp rebuild` directly inside the package
+-# directory bypasses npm's script-running layer entirely and is deterministic
+-# regardless of npm version or ignore-scripts allowlist behavior.
+-# node-gyp comes from npm's own bundled copy (deterministic, already in the image)
+-# instead of `npx --yes`, which would install an arbitrary registry version
+-# on-demand and run its lifecycle scripts (Sonar docker:S6505).
+-#
+-# tls-client-node (chatgpt-web/claude-web/grok-web/lmarena/perplexity-web TLS
+-# impersonation) hits the same --ignore-scripts wall: its own postinstall.js
+-# fetches a platform .so/.dylib/.dll from the bogdanfinn/tls-client GitHub
+-# Releases API and is never invoked when npm ci skips lifecycle scripts. Unlike
+-# better-sqlite3 above, that script never throws on failure — it only
+-# `console.warn`s and exits 0 — so a rate-limited or offline build would
+-# otherwise succeed silently with an empty bin/ and only fail at first request
+-# in production (TlsClientUnavailableError, #7802). Run it explicitly here so
+-# a broken/rate-limited fetch fails the BUILD loudly instead of shipping a
+-# broken image.
+-RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-npm-cache,target=/root/.npm \
+-  npm ci --include=optional --no-audit --no-fund --legacy-peer-deps --ignore-scripts \
++# node-gyp is invoked directly (not via `npm rebuild`) because under npm 11 +
++# `--ignore-scripts` the rebuild path depends on npm's script-allowlist machinery
++# and yields a broken better-sqlite3 binding on self-hosted builders.
++# tls-client-node's postinstall only console.warns on failure, so verify its bin/
++# is non-empty or the image ships broken and fails at first request (#7802).
++RUN  npm ci --include=optional --no-audit --no-fund --legacy-peer-deps --ignore-scripts \
+   && (cd node_modules/better-sqlite3 \
+       && node /usr/local/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js rebuild) \
+   && node -e "require('better-sqlite3')(':memory:').close()" \
+   && node node_modules/tls-client-node/scripts/postinstall.js \
+   && (test -n "$(find node_modules/tls-client-node/bin -mindepth 1 -print -quit 2>/dev/null)" \
+-      || (echo "tls-client-node native binary missing after postinstall — GitHub API fetch likely rate-limited or failed (#7802)" >&2 && exit 1))
+-
+-# Build with Turbopack (stable in Next 16, the repo default). The v3.8.27-era
+-# TurbopackInternalError panic ("entered unreachable code: there must be a path to a
+-# root" in ImportTracer::get_traces) no longer reproduces on Next 16.2.9 — validated
+-# 2026-07-05 with clean amd64 (12min14s, image smoke-tested: /api/monitoring/health
+-# 200) and arm64 (qemu, exit 0, zero panic strings) builds. Turbopack cut the bare
+-# build from 17min to 9min on the same 32-core box. Webpack stays available as the
+-# escape hatch: `--build-arg`/-e OMNIROUTE_USE_TURBOPACK=0.
++      || (echo "tls-client-node native binary missing after postinstall (#7802)" >&2 && exit 1))
++
++# Build with webpack (stable). Turbopack hit a non-recoverable internal panic on this
++# Next.js version during the v3.8.27 release build — TurbopackInternalError "entered
++# unreachable code: there must be a path to a root" in ImportTracer::get_traces, on both
++# linux/amd64 and linux/arm64. Webpack is the proven engine (build:release / VPS / CI Build
++# all green). Re-enable Turbopack (=1) once the upstream tracer bug is fixed.
+ # See docs/ops/QUALITY_GATE_PLAYBOOK.md Parte 6.
+ #
+ # Declared as ARG+ENV, not a bare ENV: a bare ENV shadows any same-named ARG for
+@@ -200,10 +177,7 @@ ARG OMNIROUTE_BUILD_WORKERS=3
+ ENV CIRCLE_NODE_TOTAL=${OMNIROUTE_BUILD_WORKERS}
+ 
+ COPY . ./
+-RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-next-cache,target=/app/.build/next/cache \
+-  mkdir -p /app/data \
+-  && npm run build \
+-  && node --input-type=module -e "import { createRequire } from 'node:module'; import { pathToFileURL } from 'node:url'; const standaloneRoot = '/app/.build/next/standalone/node_modules/'; const require = createRequire('/app/.build/next/standalone/package.json'); for (const pkg of ['@atjsh/llmlingua-2', '@huggingface/transformers', 'js-tiktoken']) { const resolved = require.resolve(pkg); if (!resolved.startsWith(standaloneRoot)) throw new Error(pkg + ' resolved outside standalone: ' + resolved); await import(pathToFileURL(resolved).href); } const onnxRuntime = require.resolve('onnxruntime-node'); if (!onnxRuntime.startsWith(standaloneRoot)) throw new Error('onnxruntime-node resolved outside standalone: ' + onnxRuntime); await import(pathToFileURL(onnxRuntime).href);"
++RUN  mkdir -p /app/data && npm run build
+ 
+ # ── Runner base ────────────────────────────────────────────────────────────
+ FROM base AS runner-base
+@@ -260,11 +234,13 @@ EXPOSE 20128
+ 
+ # Drop to non-root before ENTRYPOINT/CMD so every derived stage (runner-cli,
+ # runner-web) also runs as a non-root user unless they explicitly switch back.
+-USER node
+-
+ # Warns if the mounted data volume has wrong ownership
+-COPY --chmod=755 scripts/check-permissions.sh /app/check-permissions.sh
+-ENTRYPOINT ["/app/check-permissions.sh"]
++COPY scripts/check-permissions.sh /tmp/check-permissions.sh
++RUN chmod 755 /tmp/check-permissions.sh
++# Drop to non-root AFTER the root-owned chmod above (legacy-docker: --chmod on
++# COPY needs BuildKit which is unavailable here, so chmod runs as a step).
++USER node
++ENTRYPOINT ["/tmp/check-permissions.sh"]
+ 
+ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+   CMD ["node", "healthcheck.mjs"]
+@@ -304,9 +280,7 @@ COPY --from=builder /app/node_modules/playwright ./node_modules/playwright
+ # browsers land under /home/node which persists across image layers and is
+ # accessible to the non-root runtime user.
+ ENV PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright
+-RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
+-  --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+-  apt-get update \
++RUN  apt-get update \
+   && node node_modules/playwright/cli.js install chromium --with-deps \
+   && chown -R node:node /home/node/.cache \
+   && rm -rf /var/lib/apt/lists/*
+@@ -326,15 +300,12 @@ COPY --from=builder /app/node_modules/playwright-core ./node_modules/playwright-
+ COPY --from=builder /app/node_modules/playwright ./node_modules/playwright
+ 
+ # Install system dependencies required by openclaw (git+ssh references).
+-RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
+-  --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+-  apt-get update \
++RUN  apt-get update \
+   && apt-get install -y --no-install-recommends git ca-certificates docker.io docker-compose \
+   && rm -rf /var/lib/apt/lists/* \
+   && git config --system url."https://github.com/".insteadOf "ssh://git@github.com/"
+ 
+ # Install CLI tools globally. Separate layer from apt for better cache reuse.
+-RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-npm-cache,target=/root/.npm \
+-  npm install -g --no-audit --no-fund @openai/codex @anthropic-ai/claude-code droid openclaw@latest
++RUN  npm install -g --no-audit --no-fund @openai/codex @anthropic-ai/claude-code droid openclaw@latest
+ 
+ USER node
+diff --git a/open-sse/handlers/chatCore.ts b/open-sse/handlers/chatCore.ts
+index 3c240717a..5b4abfee2 100644
+--- a/open-sse/handlers/chatCore.ts
++++ b/open-sse/handlers/chatCore.ts
+@@ -3237,7 +3237,7 @@ export async function handleChatCore({
+                 const nextCreds = await getProviderCredentials(
+                   "codex",
+                   null,
+-                  null,
++                  apiKeyInfo?.allowedConnections ?? null,
+                   modelToCall || model || requestedModel || null,
+                   {
+                     excludeConnectionIds: [...codexExcludedIds],
+@@ -3319,7 +3319,7 @@ export async function handleChatCore({
+                   const byopNextCreds = await getProviderCredentials(
+                     "antigravity",
+                     null,
+-                    null,
++                    apiKeyInfo?.allowedConnections ?? null,
+                     modelToCall || model || requestedModel || null,
+                     { excludeConnectionIds: [...antigravityByopExcludedIds] }
+                   ).catch(() => null);
+diff --git a/open-sse/handlers/privateLaneChat.ts b/open-sse/handlers/privateLaneChat.ts
+new file mode 100644
+index 000000000..0b25f0a1c
+--- /dev/null
++++ b/open-sse/handlers/privateLaneChat.ts
+@@ -0,0 +1,234 @@
++import http from "node:http";
++import { z } from "zod";
++import { enforceApiKeyPolicy } from "@/shared/utils/apiKeyPolicy";
++import { isModelAllowedForKey, validateApiKey } from "@/lib/db/apiKeys";
++import {
++  requirePrivateLane,
++  PRIVATE_LANE_MODEL,
++  PRIVATE_LANE_TARGET,
++  PRIVATE_LANE_UPSTREAM,
++} from "@/lib/db/privateLane";
++import { errorResponse } from "../utils/error.ts";
++
++const LIMIT = 256 * 1024; // Upstream RESPONSE cap; readBody separately bounds REQUESTS to 64 KiB.
++const headers = { "cache-control": "no-store", "content-type": "application/json" };
++// ponytail: one in-flight request per server process; no claim of reserving unrelated Jetson clients.
++let busy = false;
++const inputSchema = z
++  .object({
++    model: z.literal(PRIVATE_LANE_TARGET),
++    messages: z
++      .array(
++        z
++          .object({
++            role: z.enum(["system", "developer", "user", "assistant"]),
++            content: z.string().max(32768),
++          })
++          .strict()
++      )
++      .min(1)
++      .max(8),
++    stream: z.literal(false),
++    max_tokens: z.number().int().min(1).max(2048),
++    temperature: z.number().min(0).max(1).optional(),
++    chat_template_kwargs: z
++      .object({ enable_thinking: z.literal(true) })
++      .strict()
++      .optional(),
++  })
++  .strict();
++// Known unused SGLang metadata is allowed only when null, then never forwarded.
++const nullMetadata = z
++  .null()
++  .optional()
++  .transform(() => undefined);
++const outputSchema = z.object({
++  model: z.literal(PRIVATE_LANE_MODEL),
++  choices: z
++    .array(
++      z
++        .object({
++          message: z
++            .object({
++              role: z.literal("assistant"),
++              content: z.string().nullable().optional(),
++              reasoning_content: z.string().nullable().optional(),
++              // MC accepts only absent/null tool_calls: zero calls normalize to null, never execute.
++              tool_calls: z
++                .union([z.null(), z.array(z.never()).length(0)])
++                .optional()
++                .transform((value) => (Array.isArray(value) ? null : value)),
++            })
++            .strict(),
++          index: z.number().int().optional(),
++          finish_reason: z
++            .enum(["stop", "length", "content_filter", "abort"])
++            .nullable()
++            .optional(),
++          logprobs: z.null().optional(),
++          matched_stop: z
++            .union([z.null(), z.number().int().nonnegative().safe(), z.string().max(32768)])
++            .optional()
++            .transform(() => undefined),
++          hidden_states: nullMetadata,
++          prompt_token_ids: nullMetadata,
++          response_token_ids: nullMetadata,
++          meta_info: nullMetadata,
++        })
++        .strict()
++    )
++    .length(1),
++  usage: z
++    .object({
++      prompt_tokens: z.number().int().nonnegative(),
++      completion_tokens: z.number().int().nonnegative(),
++      total_tokens: z.number().int().nonnegative(),
++    })
++    .optional(),
++});
++
++async function readBody(request: Request) {
++  if (!request.body) throw new Error("invalid_request");
++  const reader = request.body.getReader();
++  let interrupted = false;
++  const interrupt = () => {
++    interrupted = true;
++    void reader.cancel().catch(() => {});
++  };
++  const timer = setTimeout(interrupt, 10000);
++  request.signal.addEventListener("abort", interrupt, { once: true });
++  const chunks: Uint8Array[] = [];
++  let size = 0;
++  try {
++    while (true) {
++      const { done, value } = await reader.read();
++      if (interrupted || request.signal.aborted) throw new Error("invalid_request");
++      if (done) break;
++      size += value.byteLength;
++      if (size > 65536) {
++        await reader.cancel();
++        throw new Error("invalid_request");
++      }
++      chunks.push(value);
++    }
++    const text = Buffer.concat(chunks).toString("utf8");
++    const body: unknown = JSON.parse(text);
++    if (JSON.stringify(body) !== text) throw new Error("invalid_request");
++    return inputSchema.parse(body);
++  } finally {
++    clearTimeout(timer);
++    request.signal.removeEventListener("abort", interrupt);
++    reader.releaseLock();
++  }
++}
++
++/** This lane deliberately never enters general chat's logs, hooks, caches, tools or fallback. */
++export async function handlePrivateLaneChat(request: Request): Promise<Response> {
++  const refuse = (status: number) => {
++    const response = errorResponse(status, "private_lane_trust_required");
++    response.headers.set("cache-control", "no-store");
++    return response;
++  };
++  try {
++    if (
++      !["GET", "POST"].includes(request.method) ||
++      new URL(request.url).search ||
++      request.headers.get("x-route-model") ||
++      !request.headers.get("authorization")?.startsWith("Bearer ")
++    )
++      return refuse(403);
++    // Check before request payload, any provider credentials, network or general-policy side effects.
++    const lane = requirePrivateLane(
++      request.headers.get("x-omc-model"),
++      request.headers.get("x-omc-source-method")
++    );
++    // This streaming route bypasses middleware cloning, not authoritative authentication.
++    if (!(await validateApiKey(request.headers.get("authorization")!.slice(7).trim())))
++      return refuse(403);
++    const policy = await enforceApiKeyPolicy(
++      // Next preserves original aliases (case/double-prefix). Authorize the concrete chat endpoint.
++      new Request(new URL("/v1/chat/completions", request.url), {
++        method: request.method,
++        headers: { authorization: request.headers.get("authorization")! },
++      }),
++      PRIVATE_LANE_TARGET
++    );
++    const connections = policy.apiKeyInfo?.allowedConnections ?? [];
++    if (
++      policy.rejection ||
++      !policy.apiKeyInfo?.id ||
++      !policy.apiKey ||
++      // Generic routing may defer model authorization to combo/execution. This fixed lane must not.
++      !(await isModelAllowedForKey(policy.apiKey, PRIVATE_LANE_TARGET)) ||
++      (connections.length > 0 && !connections.includes(lane.connectionId))
++    )
++      return refuse(403);
++    if (request.signal.aborted) return refuse(503);
++    if (request.method === "GET")
++      return Response.json({ admitted: true, model: PRIVATE_LANE_TARGET, source_method: "GET" }, { headers });
++    if (busy) return refuse(503);
++    busy = true;
++    try {
++      let input: z.infer<typeof inputSchema>;
++      try {
++        input = await readBody(request);
++      } catch {
++        return refuse(400);
++      }
++      // Recheck after bounded parsing, immediately before the sole fixed local network operation.
++      requirePrivateLane(input.model, "GET");
++      const payload = JSON.stringify({ ...input, model: PRIVATE_LANE_MODEL });
++      const response = await new Promise<unknown>((resolve, reject) => {
++        const req = http.request(
++          PRIVATE_LANE_UPSTREAM,
++          {
++            method: "POST",
++            agent: false,
++            signal: AbortSignal.any([request.signal, AbortSignal.timeout(120000)]),
++            headers: {
++              "content-type": "application/json",
++              "content-length": Buffer.byteLength(payload),
++            },
++          },
++          (res) => {
++            if (res.statusCode !== 200) {
++              res.destroy();
++              reject(new Error("local_unavailable"));
++              return;
++            }
++            let size = 0;
++            const chunks: Buffer[] = [];
++            res.on("data", (chunk: Buffer) => {
++              size += chunk.length;
++              if (size > LIMIT) {
++                res.destroy();
++                reject(new Error("local_unavailable"));
++                return;
++              }
++              chunks.push(chunk);
++            });
++            res.on("error", () => reject(new Error("local_unavailable")));
++            res.on("aborted", () => reject(new Error("local_unavailable")));
++            res.on("end", () => {
++              try {
++                resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
++              } catch {
++                reject(new Error("local_unavailable"));
++              }
++            });
++          }
++        );
++        req.on("error", () => reject(new Error("local_unavailable")));
++        req.end(payload);
++      });
++      const output = outputSchema.parse(response);
++      if (!output.choices[0].message.content && !output.choices[0].message.reasoning_content)
++        return refuse(503);
++      return Response.json(output, { headers });
++    } finally {
++      busy = false;
++    }
++  } catch {
++    return refuse(503);
++  }
++}
+diff --git a/open-sse/services/autoCombo/scoring.ts b/open-sse/services/autoCombo/scoring.ts
+index 4c939501c..b22ff2eca 100644
+--- a/open-sse/services/autoCombo/scoring.ts
++++ b/open-sse/services/autoCombo/scoring.ts
+@@ -259,7 +259,7 @@ export function calculateFactors(
+   candidate: ProviderCandidate,
+   pool: ProviderCandidate[],
+   taskType: string,
+-  getTaskFitness: (model: string, taskType: string) => number,
++  getTaskFitness: (model: string, taskType: string, provider?: string) => number,
+   manifestHint?: RoutingHint | null,
+   precomputedMaxima?: PoolMaxima
+ ): ScoringFactors {
+@@ -279,7 +279,7 @@ export function calculateFactors(
+           : 0.0,
+     costInv: clamp01(1 - candidate.costPer1MTokens / maxCost),
+     latencyInv: clamp01(1 - candidate.p95LatencyMs / maxLatency),
+-    taskFit: clamp01(getTaskFitness(candidate.model, taskType)),
++    taskFit: clamp01(getTaskFitness(candidate.model, taskType, candidate.provider)),
+     stability: clamp01(1 - candidate.latencyStdDev / maxStdDev),
+     tierPriority: calculateTierScore(candidate.accountTier, candidate.quotaResetIntervalSecs),
+     tierAffinity: calculateTierAffinity(candidate, manifestHint),
+@@ -299,7 +299,7 @@ export function scorePool(
+   pool: ProviderCandidate[],
+   taskType: string,
+   weights: ScoringWeights = DEFAULT_WEIGHTS,
+-  getTaskFitness: (model: string, taskType: string) => number = () => 0.5,
++  getTaskFitness: (model: string, taskType: string, provider?: string) => number = () => 0.5,
+   manifestHint?: RoutingHint | null
+ ): ScoredProvider[] {
+   const poolMaxima = computePoolMaxima(pool);
+diff --git a/open-sse/services/autoCombo/taskFitness.ts b/open-sse/services/autoCombo/taskFitness.ts
+index 6489583ae..1fe7c6db2 100644
+--- a/open-sse/services/autoCombo/taskFitness.ts
++++ b/open-sse/services/autoCombo/taskFitness.ts
+@@ -337,13 +337,14 @@ function lookupWildcardBoosts(normalizedModel: string, normalizedTask: string):
+   return Math.min(1.0, baseScore);
+ }
+ 
+-export function getTaskFitness(model: string, taskType: string): number {
+-  return getTaskFitnessWithSource(model, taskType).score;
++export function getTaskFitness(model: string, taskType: string, provider?: string): number {
++  return getTaskFitnessWithSource(model, taskType, provider).score;
+ }
+ 
+ export function getTaskFitnessWithSource(
+   model: string,
+-  taskType: string
++  taskType: string,
++  provider?: string
+ ): { score: number; source: string } {
+   const normalizedModel = model.toLowerCase();
+   const normalizedTask = taskType.toLowerCase();
+@@ -379,6 +380,16 @@ export function getTaskFitnessWithSource(
+     return { score: staticScore, source: "fitness_table" };
+   }
+ 
++  // Compatible Claude CLI bridges use bare family names; Codex strips its
++  // provider prefix before scoring. Keep exact user/arena/tier data above first.
++  const family = /^(sonnet|opus|haiku)(?:-|$)/.exec(normalizedModel)?.[1];
++  const alias = family
++    ? `claude-${normalizedModel}`
++    : provider === "codex"
++      ? `codex/${normalizedModel}`
++      : null;
++  const aliasScore = alias ? lookupStaticFitnessTable(alias, normalizedTask) : null;
++  if (aliasScore !== null) return { score: aliasScore, source: "fitness_table_alias" };
+   return { score: lookupWildcardBoosts(normalizedModel, normalizedTask), source: "wildcard_boost" };
+ }
+ 
+diff --git a/open-sse/services/combo/autoStrategy.ts b/open-sse/services/combo/autoStrategy.ts
+index 78964c4c7..48f3e931e 100644
+--- a/open-sse/services/combo/autoStrategy.ts
++++ b/open-sse/services/combo/autoStrategy.ts
+@@ -178,6 +178,7 @@ export function mapIntentToTaskType(intent: string): "coding" | "analysis" | "de
+   switch (intent) {
+     case "code":
+       return "coding";
++    case "math":
+     case "reasoning":
+       return "analysis";
+     case "simple":
+diff --git a/open-sse/services/combo/promptAwareRouting.ts b/open-sse/services/combo/promptAwareRouting.ts
+new file mode 100644
+index 000000000..0262daf33
+--- /dev/null
++++ b/open-sse/services/combo/promptAwareRouting.ts
+@@ -0,0 +1,91 @@
++import { BudgetExceededError } from "../autoCombo/engine.ts";
++import type { ScoringWeights } from "../autoCombo/scoring.ts";
++import type { RoutingHint } from "../manifestAdapter";
++import { scoreAutoTargets } from "./autoStrategy.ts";
++import { MAX_RR_COUNTERS, rrCounters } from "./rrState.ts";
++import type { AutoProviderCandidate, ResolvedComboTarget } from "./types.ts";
++
++/** Only reorder already-authorized, compatible, quota-eligible account targets. */
++export function orderPromptAwareTargets(
++  input: {
++    comboName: string;
++    targets: ResolvedComboTarget[];
++    candidates: AutoProviderCandidate[];
++    taskType: string;
++    intent: string;
++    intentEnabled: boolean;
++    weights: ScoringWeights;
++    manifestHint?: RoutingHint | null;
++    budgetCap?: number;
++    budgetFallback?: "strict" | "cheapest";
++  },
++  score = scoreAutoTargets
++): { targets: ResolvedComboTarget[]; reason: string } {
++  let candidates = input.candidates.filter((candidate) => !candidate.quotaCutoffBlocked);
++  // Match the existing auto engine's 1,000-token routing estimate. This is NOT
++  // an enforceable request/spend ceiling; provider admission still owns that.
++  if (input.budgetCap) {
++    const affordable = candidates.filter(
++      (candidate) => candidate.costPer1MTokens / 1000 <= input.budgetCap!
++    );
++    if (affordable.length) candidates = affordable;
++    else if (input.budgetFallback === "strict") {
++      throw new BudgetExceededError(
++        input.budgetCap,
++        Math.min(...candidates.map((candidate) => candidate.costPer1MTokens / 1000))
++      );
++    } else {
++      candidates = [...candidates]
++        .sort((a, b) => a.costPer1MTokens - b.costPer1MTokens)
++        .slice(0, 1);
++    }
++  }
++  const eligible = candidates.flatMap((candidate) => {
++    const base = input.targets.find(
++      (target) =>
++        target.provider === candidate.provider &&
++        target.modelStr === candidate.modelStr &&
++        (!target.connectionId || target.connectionId === candidate.connectionId)
++    );
++    return base
++      ? [
++          {
++            ...base,
++            executionKey: candidate.executionKey,
++            connectionId: candidate.connectionId ?? base.connectionId,
++          },
++        ]
++      : [];
++  });
++  if (!eligible.length) return { targets: [], reason: "no eligible account targets" };
++
++  const key = `${input.comboName}:prompt-fallback`;
++  if (!rrCounters.has(key) && rrCounters.size >= MAX_RR_COUNTERS) {
++    const oldest = rrCounters.keys().next().value;
++    if (oldest !== undefined) rrCounters.delete(oldest);
++  }
++  const start = (rrCounters.get(key) || 0) % eligible.length;
++  rrCounters.set(key, (start + 1) % eligible.length);
++  const fallback = [...eligible.slice(start), ...eligible.slice(0, start)];
++  if (!input.intentEnabled || input.intent === "medium") {
++    return { targets: fallback, reason: "round-robin: intent disabled or unclassified" };
++  }
++  try {
++    const ranked = score(eligible, candidates, input.taskType, input.weights, input.manifestHint);
++    const best = ranked.find((entry) => Number.isFinite(entry.score))?.target;
++    // Scoring cannot inject a target outside the validated pool.
++    const winner = best && eligible.find((target) => target.executionKey === best.executionKey);
++    if (winner)
++      return {
++        targets: [
++          winner,
++          ...fallback.filter((target) => target.executionKey !== winner.executionKey),
++        ],
++        reason: `prompt-aware: intent=${input.intent} task=${input.taskType}; round-robin fallback`,
++      };
++  } catch {
++    // ponytail: synchronous intent/fitness scoring; semantic classifier can be
++    // added if measured misroutes justify its extra latency and model usage.
++  }
++  return { targets: fallback, reason: "round-robin: scoring unavailable" };
++}
+diff --git a/open-sse/services/combo/resolveAutoStrategy.ts b/open-sse/services/combo/resolveAutoStrategy.ts
+index 45ef4b5c6..10a75d5c6 100644
+--- a/open-sse/services/combo/resolveAutoStrategy.ts
++++ b/open-sse/services/combo/resolveAutoStrategy.ts
+@@ -20,11 +20,14 @@ import { parseModel } from "../model.ts";
+ import { supportsToolCalling } from "../modelCapabilities.ts";
+ import type { ResilienceSettings } from "../../../src/lib/resilience/settings";
+ import { parseAutoConfig } from "./autoConfig.ts";
+-import { dedupeTargetsByExecutionKey } from "./comboData.ts";
++import { dedupeTargetsByExecutionKey, isRecord } from "./comboData.ts";
+ import {
+   getModelContextLimitForModelString,
+   providerSupportsEmulatedToolCalling,
++  filterTargetsByRequestCompatibility,
++  describeCapabilityFilterExhaustion,
+ } from "./comboStructure.ts";
++import { orderPromptAwareTargets } from "./promptAwareRouting.ts";
+ import {
+   calculatePromptCacheAffinityScores,
+   promptCacheTargetIdentity,
+@@ -297,6 +300,62 @@ export async function resolveAutoStrategyOrder(
+       ),
+     };
+   }
++  const autoSettings =
++    combo.autoConfig || (isRecord(combo.config?.auto) ? combo.config.auto : combo.config) || {};
++  if (autoSettings.promptAwareRouting === true) {
++    // Reuse the hard compatibility gate before choosing, not just after it.
++    // The normal pipeline still repeats admission and native-turn pin checks.
++    const compatible = filterTargetsByRequestCompatibility(eligibleTargets, body, log);
++    if (!compatible.length) {
++      const exhaustion = describeCapabilityFilterExhaustion(eligibleTargets, body, combo.name);
++      if (exhaustion)
++        return {
++          earlyResponse: errorResponseWithComboDiagnostics(
++            400,
++            exhaustion.message,
++            {
++              poolSize: eligibleTargets.length,
++              attempted: 0,
++              excluded: exhaustion.excluded,
++              attemptOrder: [],
++              terminalReason: exhaustion.terminalReason,
++            },
++            { code: "capability_mismatch", type: "invalid_request_error" }
++          ),
++        };
++    }
++    const manifestHint =
++      config.complexityAwareRouting === true || autoSettings.complexityAwareRouting === true
++        ? buildComplexityRoutingHint(
++            compatible.filter((t) => t.kind === "model"),
++            body,
++            log
++          )
++        : null;
++    try {
++      const decision = orderPromptAwareTargets({
++        comboName: combo.name,
++        targets: compatible,
++        candidates: routableCandidates,
++        taskType,
++        intent,
++        intentEnabled: intentConfig.enabled,
++        weights,
++        manifestHint,
++        budgetCap,
++        budgetFallback,
++      });
++      log.info(
++        "COMBO",
++        `Auto selection: ${decision.targets[0]?.modelStr || "none"} | ${decision.reason}`
++      );
++      return { orderedTargets: decision.targets, autoUsedExplicitRouter: true };
++    } catch (err) {
++      if (err instanceof BudgetExceededError)
++        return { earlyResponse: errorResponse(402, err.message) };
++      throw err;
++    }
++  }
+   if (routableCandidates.length > 0) {
+     let selectedProvider: string | null = null;
+     let selectedModel: string | null = null;
+@@ -372,7 +431,7 @@ export async function resolveAutoStrategyOrder(
+     // difficulty and feed a tier hint into scoring so tierAffinity /
+     // specificityMatch favor candidates whose tier matches the request.
+     const autoManifestHint: RoutingHint | null =
+-      config.complexityAwareRouting === true
++      config.complexityAwareRouting === true || autoSettings.complexityAwareRouting === true
+         ? buildComplexityRoutingHint(
+             eligibleTargets.filter((t) => t.kind === "model"),
+             body,
+diff --git a/open-sse/services/intentClassifier.ts b/open-sse/services/intentClassifier.ts
+index 0ed15f96d..f79c7ffeb 100644
+--- a/open-sse/services/intentClassifier.ts
++++ b/open-sse/services/intentClassifier.ts
+@@ -39,7 +39,6 @@ export const CODE_KEYWORDS: readonly string[] = [
+   "javascript",
+   "code",
+   "implement",
+-  "write a",
+   "create a component",
+   "endpoint",
+   "repository",
+@@ -73,9 +72,7 @@ export const CODE_KEYWORDS: readonly string[] = [
+   "refatorar",
+   "código",
+   "implementar",
+-  "criar um",
+   "componente",
+-  "como fazer",
+   "repositório",
+   "configurar",
+   "instalar",
+@@ -587,6 +584,15 @@ export const SIMPLE_KEYWORDS: readonly string[] = [
+   "ملخص",
+ ];
+ 
++function matchesKeyword(text: string, keyword: string): boolean {
++  const lower = keyword.toLowerCase();
++  // CJK keywords may be parts of unsegmented words; Latin short keywords must
++  // not match "def" in "define" or "const" in "constellation".
++  if (/[^\p{Script=Latin}\p{N}\s_]/u.test(lower)) return text.includes(lower);
++  const escaped = lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++  return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "u").test(text);
++}
++
+ /**
+  * Classify a prompt's intent using multilingual keyword matching.
+  * Priority: code > math > reasoning > creative > simple > medium (default)
+@@ -596,7 +602,7 @@ export function classifyPromptIntent(prompt: string, systemPrompt?: string): Int
+   const wordCount = prompt.trim().split(/\s+/).length;
+ 
+   for (const kw of CODE_KEYWORDS) {
+-    if (fullText.includes(kw.toLowerCase())) return "code";
++    if (matchesKeyword(fullText, kw)) return "code";
+   }
+   for (const kw of MATH_KEYWORDS) {
+     if (fullText.includes(kw.toLowerCase())) return "math";
+@@ -645,7 +651,7 @@ export function classifyWithConfig(
+   const creativeKws = [...CREATIVE_KEYWORDS, ...(config.extraCreativeKeywords ?? [])];
+   const simpleKws = [...SIMPLE_KEYWORDS, ...(config.extraSimpleKeywords ?? [])];
+   for (const kw of codeKws) {
+-    if (fullText.includes(kw.toLowerCase())) return "code";
++    if (matchesKeyword(fullText, kw)) return "code";
+   }
+   for (const kw of mathKws) {
+     if (fullText.includes(kw.toLowerCase())) return "math";
+diff --git a/package-lock.json b/package-lock.json
+index 10f668c47..afd61631c 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -25588,17 +25588,6 @@
+         "node": ">= 14"
+       }
+     },
+-    "node_modules/libxmljs2/node_modules/brace-expansion": {
+-      "version": "2.1.4",
+-      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-2.1.4.tgz",
+-      "integrity": "sha512-hGfVzPxthbf3+2yjg/RBs60cB0FhqBS/zvdV/4wn4/BmN0bNMMHPc4V/BbFieqf1TKAGGAHnY4eSjajCl0f2Xg==",
+-      "dev": true,
+-      "license": "MIT",
+-      "optional": true,
+-      "dependencies": {
+-        "balanced-match": "^1.0.0"
+-      }
+-    },
+     "node_modules/libxmljs2/node_modules/cacache": {
+       "version": "19.0.1",
+       "resolved": "https://registry.npmjs.org/cacache/-/cacache-19.0.1.tgz",
+@@ -25722,6 +25711,18 @@
+         "url": "https://github.com/sponsors/isaacs"
+       }
+     },
++    "node_modules/libxmljs2/node_modules/minimatch/node_modules/brace-expansion": {
++      "version": "1.1.21",
++      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-1.1.21.tgz",
++      "integrity": "sha512-9zeA+KLZNNzglF2TPKRQEDyx6Yby7daAkuy8MiPzpXPsYDWi/DRM8jmwUDxokQjYqBpv5DgPiwD4h4ZZSy1Ujw==",
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "balanced-match": "^1.0.0",
++        "concat-map": "0.0.1"
++      }
++    },
+     "node_modules/libxmljs2/node_modules/minipass-fetch": {
+       "version": "4.0.1",
+       "resolved": "https://registry.npmjs.org/minipass-fetch/-/minipass-fetch-4.0.1.tgz",
+diff --git a/src/app/(dashboard)/dashboard/settings/components/ModelCapabilityOverridesTab.tsx b/src/app/(dashboard)/dashboard/settings/components/ModelCapabilityOverridesTab.tsx
+index e0b0ee66a..ca04ff80a 100644
+--- a/src/app/(dashboard)/dashboard/settings/components/ModelCapabilityOverridesTab.tsx
++++ b/src/app/(dashboard)/dashboard/settings/components/ModelCapabilityOverridesTab.tsx
+@@ -10,8 +10,12 @@ import {
+ } from "@/lib/modelCapabilityOverrideTargets";
+ 
+ type ModelOverrideKey =
+-  "context_length" | "max_input_tokens" | "max_output_tokens" | "reasoning_efforts";
+-type ModelOverrideValue = number | string[];
++  | "context_length"
++  | "max_input_tokens"
++  | "max_output_tokens"
++  | "reasoning_efforts"
++  | "fully_trusted";
++type ModelOverrideValue = number | string[] | boolean;
+ type StatusTone = "success" | "error" | "info";
+ 
+ type ModelOverrideTarget = import("@/lib/modelCapabilityOverrideTargets").ModelOverrideTarget;
+@@ -72,7 +76,7 @@ function useModelCapabilityOverridesData() {
+   }, [showStatus, t]);
+ 
+   const saveOverride = useCallback(
+-    async (target: string, key: ModelOverrideKey, value: number | string) => {
++    async (target: string, key: ModelOverrideKey, value: number | string | boolean) => {
+       try {
+         const response = await fetch("/api/model-capability-overrides", {
+           method: "PATCH",
+@@ -152,7 +156,7 @@ function ModelCapabilityOverridesPanel({
+ }: {
+   targets: ModelOverrideTarget[];
+   overrides: ModelCapabilityOverride[];
+-  onSave: (target: string, key: ModelOverrideKey, value: number | string) => void;
++  onSave: (target: string, key: ModelOverrideKey, value: number | string | boolean) => void;
+   onRemove: (target: string, key: ModelOverrideKey) => void;
+ }) {
+   const [selectedTarget, setSelectedTarget] = useState("");
+@@ -296,7 +300,7 @@ function ModelOverrideEditor({
+   activeOverrides: ModelCapabilityOverride[];
+   activeTarget: string;
+   onRemove: (target: string, key: ModelOverrideKey) => void;
+-  onSave: (target: string, key: ModelOverrideKey, value: number | string) => void;
++  onSave: (target: string, key: ModelOverrideKey, value: number | string | boolean) => void;
+ }) {
+   const t = useTranslations("settings");
+   return (
+@@ -307,6 +311,17 @@ function ModelOverrideEditor({
+         </p>
+         <p className="text-xs font-mono break-all">{activeTarget || t("none")}</p>
+       </div>
++      <label className="text-xs flex items-center gap-2">
++        <input
++          type="checkbox"
++          disabled={!activeTarget}
++          checked={activeOverrides.some(
++            (entry) => entry.key === "fully_trusted" && entry.value === true
++          )}
++          onChange={(event) => onSave(activeTarget, "fully_trusted", event.target.checked)}
++        />
++        fully_trusted — Jira GET only; pinned local lane still required
++      </label>
+       <ModelOverrideForm activeTarget={activeTarget} onSave={onSave} />
+       <ModelOverrideRows activeOverrides={activeOverrides} onRemove={onRemove} />
+     </div>
+@@ -411,7 +426,7 @@ function ModelOverrideRow({
+       <div className="flex items-center gap-2 min-w-0">
+         <span className="font-mono px-1.5 py-0.5 rounded bg-bg-subtle">{override.key}</span>
+         <span className="font-semibold tabular-nums">
+-          {Array.isArray(override.value) ? override.value.join(", ") : override.value}
++          {Array.isArray(override.value) ? override.value.join(", ") : String(override.value)}
+         </span>
+       </div>
+       <button
+diff --git a/src/app/api/model-capability-overrides/route.ts b/src/app/api/model-capability-overrides/route.ts
+index 2b03ef8a3..700effccf 100644
+--- a/src/app/api/model-capability-overrides/route.ts
++++ b/src/app/api/model-capability-overrides/route.ts
+@@ -21,6 +21,7 @@ const overrideKeySchema = z.enum([
+   "max_input_tokens",
+   "max_output_tokens",
+   "reasoning_efforts",
++  "fully_trusted",
+ ]);
+ type PublicOverrideKey = z.infer<typeof overrideKeySchema>;
+ type PublicOverride = {
+@@ -28,7 +29,7 @@ type PublicOverride = {
+   modelId: string;
+   target: string;
+   key: PublicOverrideKey;
+-  value: number | string[];
++  value: number | string[] | boolean;
+   refreshedAt: string;
+ };
+ 
+@@ -101,6 +102,13 @@ const reasoningEffortsValueSchema = z.string().transform((value, context) => {
+ });
+ 
+ const upsertOverrideSchema = z.discriminatedUnion("key", [
++  z
++    .object({
++      target: z.string().min(3),
++      key: z.literal("fully_trusted"),
++      value: z.boolean(),
++    })
++    .strict(),
+   z.object({
+     target: z.string().min(3),
+     key: z.enum(["context_length", "max_input_tokens", "max_output_tokens"]),
+@@ -179,8 +187,10 @@ export async function PATCH(request: Request) {
+   if (authError) return authError;
+ 
+   let rawBody: unknown;
++  let rawText: string;
+   try {
+-    rawBody = await request.json();
++    rawText = await request.text();
++    rawBody = JSON.parse(rawText);
+   } catch {
+     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+   }
+@@ -189,6 +199,10 @@ export async function PATCH(request: Request) {
+   if (!parsed.success) {
+     return NextResponse.json({ error: parsed.error.issues }, { status: 400 });
+   }
++  // Canonical trust JSON rejects duplicate/escaped member ambiguity before mutation.
++  if (parsed.data.key === "fully_trusted" && JSON.stringify(rawBody) !== rawText) {
++    return NextResponse.json({ error: "Canonical trust metadata required" }, { status: 400 });
++  }
+ 
+   const { entries, nodeToPrefix, prefixToNode, eligibleNodeIds, compatibleNodeIds } =
+     await loadPrefixMaps();
+diff --git a/src/app/api/v1/private/chat/completions/route.ts b/src/app/api/v1/private/chat/completions/route.ts
+new file mode 100644
+index 000000000..b17f97e46
+--- /dev/null
++++ b/src/app/api/v1/private/chat/completions/route.ts
+@@ -0,0 +1,6 @@
++import { handlePrivateLaneChat } from "@omniroute/open-sse/handlers/privateLaneChat.ts";
++
++export const runtime = "nodejs";
++export const dynamic = "force-dynamic";
++export const GET = handlePrivateLaneChat;
++export const POST = handlePrivateLaneChat;
+diff --git a/src/app/api/v1/providers/[provider]/models/route.ts b/src/app/api/v1/providers/[provider]/models/route.ts
+index 9e5450be9..c6eb10b54 100644
+--- a/src/app/api/v1/providers/[provider]/models/route.ts
++++ b/src/app/api/v1/providers/[provider]/models/route.ts
+@@ -3,6 +3,7 @@ import { getServiceModels } from "@/lib/db/serviceModels";
+ import { isServiceBackendPluginId } from "@/lib/services/serviceBackends";
+ import { getRegistryEntry } from "@omniroute/open-sse/config/providerRegistry.ts";
+ import { getProviderById, getProviderByAlias } from "@/shared/constants/providers";
++import { getProviderNodeById } from "@/lib/db/providers/nodes";
+ import { isCompatibleProviderConnectionId } from "@/shared/utils/compatibleProviderId";
+ 
+ /**
+@@ -53,6 +54,14 @@ export async function GET(request: Request, { params }: { params: Promise<{ prov
+     } else {
+       // Allow fetching models by connection ID for compatible providers
+       const isCompatibleConnectionId = isCompatibleProviderConnectionId(rawProvider);
++      // The catalog publishes a compatible node's models as `<prefix>/<model>`, owned by the
++      // prefix (#8327), so match and unprefix by it rather than by the raw node id.
++      const nodePrefix = isCompatibleConnectionId
++        ? (await getProviderNodeById(rawProvider))?.prefix
++        : null;
++      if (typeof nodePrefix === "string" && nodePrefix) {
++        providerId = providerAlias = nodePrefix;
++      }
+       if (!isCompatibleConnectionId) {
+         return Response.json(
+           {
+diff --git a/src/lib/db/modelCapabilityOverrides.ts b/src/lib/db/modelCapabilityOverrides.ts
+index ced5a2bde..8e70ea9a6 100644
+--- a/src/lib/db/modelCapabilityOverrides.ts
++++ b/src/lib/db/modelCapabilityOverrides.ts
+@@ -7,10 +7,9 @@ import { getDbInstance } from "./core";
+ import { invalidateDbCache } from "./readCache";
+ 
+ export type NumericModelCapabilityOverrideKey =
+-  | "max_input_tokens"
+-  | "max_output_tokens"
+-  | "max_token";
+-export type ModelCapabilityOverrideKey = NumericModelCapabilityOverrideKey | "reasoning_efforts";
++  "max_input_tokens" | "max_output_tokens" | "max_token";
++export type ModelCapabilityOverrideKey =
++  NumericModelCapabilityOverrideKey | "reasoning_efforts" | "fully_trusted";
+ 
+ interface ModelCapabilityOverrideBase {
+   provider: string;
+@@ -20,6 +19,7 @@ interface ModelCapabilityOverrideBase {
+ }
+ 
+ export type ModelCapabilityOverride =
++  | (ModelCapabilityOverrideBase & { key: "fully_trusted"; value: boolean })
+   | (ModelCapabilityOverrideBase & {
+       key: NumericModelCapabilityOverrideKey;
+       value: number;
+@@ -42,7 +42,7 @@ function isNumericKey(value: unknown): value is NumericModelCapabilityOverrideKe
+ }
+ 
+ function isSupportedKey(value: unknown): value is ModelCapabilityOverrideKey {
+-  return isNumericKey(value) || value === "reasoning_efforts";
++  return isNumericKey(value) || value === "reasoning_efforts" || value === "fully_trusted";
+ }
+ 
+ function isPositiveInteger(value: unknown): value is number {
+@@ -87,6 +87,11 @@ function toOverride(row: OverrideRow): ModelCapabilityOverride | null {
+     target: `${row.provider}/${row.model_id}`,
+     refreshedAt: row.refreshed_at,
+   };
++  if (row.override_key === "fully_trusted") {
++    return typeof parsedValue === "boolean"
++      ? { ...base, key: "fully_trusted", value: parsedValue }
++      : null;
++  }
+   if (row.override_key === "reasoning_efforts") {
+     return isReasoningEfforts(parsedValue)
+       ? { ...base, key: row.override_key, value: parsedValue }
+@@ -123,7 +128,7 @@ export function getModelCapabilityOverride(
+       )
+       .get(target.provider, target.modelId, key) as OverrideRow | undefined;
+     const override = row ? toOverride(row) : null;
+-    return override && override.key !== "reasoning_efforts" ? override.value : null;
++    return override && isNumericKey(override.key) ? (override.value as number) : null;
+   } catch {
+     return null;
+   }
+@@ -155,13 +160,16 @@ export function getReasoningEffortsOverride(
+ export function setModelCapabilityOverride(
+   target: string,
+   key: ModelCapabilityOverrideKey,
+-  value: number | string | readonly string[]
++  value: number | string | readonly string[] | boolean
+ ): boolean {
+   const parsedTarget = parseModelOverrideTarget(target);
+   if (!parsedTarget || !isSupportedKey(key)) return false;
+ 
+-  let normalizedValue: number | ReasoningEffortOverrideValue[];
+-  if (key === "reasoning_efforts") {
++  let normalizedValue: number | ReasoningEffortOverrideValue[] | boolean;
++  if (key === "fully_trusted") {
++    if (typeof value !== "boolean") return false;
++    normalizedValue = value;
++  } else if (key === "reasoning_efforts") {
+     const parsed = Array.isArray(value)
+       ? parseReasoningEffortsOverride(value.join(","))
+       : parseReasoningEffortsOverride(value);
+diff --git a/src/lib/db/privateLane.ts b/src/lib/db/privateLane.ts
+new file mode 100644
+index 000000000..a84ebbee5
+--- /dev/null
++++ b/src/lib/db/privateLane.ts
+@@ -0,0 +1,48 @@
++import { getDbInstance } from "./core";
++
++// Set per instance. Unset means the private lane refuses every request.
++export const PRIVATE_LANE_MODEL = process.env.OMC_PRIVATE_LANE_MODEL ?? "";
++export const PRIVATE_LANE_BASE_URL = (process.env.OMC_PRIVATE_LANE_BASE_URL ?? "").replace(/\/+$/, "");
++export const PRIVATE_LANE_TARGET = `vllm/${PRIVATE_LANE_MODEL}`;
++export const PRIVATE_LANE_UPSTREAM = `${PRIVATE_LANE_BASE_URL}/chat/completions`;
++
++/** No credentials selected. This special lane never uses general routing/proxy configuration. */
++export function requirePrivateLane(target: unknown, sourceMethod: unknown) {
++  if (!PRIVATE_LANE_MODEL || !PRIVATE_LANE_BASE_URL) throw new Error("private_lane_trust_required");
++  if (target !== PRIVATE_LANE_TARGET || sourceMethod !== "GET") throw new Error("private_lane_trust_required");
++  const db = getDbInstance();
++  // Do not let the general prefix winner rule turn ambiguity into a security grant.
++  const nodes = db
++    .prepare(
++      "SELECT id,type,base_url,chat_path,custom_headers_json FROM provider_nodes WHERE prefix='vllm'"
++    )
++    .all() as Array<{
++    id: string;
++    type: string;
++    base_url: string;
++    chat_path: string | null;
++    custom_headers_json: string | null;
++  }>;
++  const node = nodes[0];
++  if (
++    nodes.length !== 1 ||
++    node.type !== "openai-compatible" ||
++    node.base_url !== PRIVATE_LANE_BASE_URL ||
++    ![null, "/chat/completions"].includes(node.chat_path) ||
++    ![null, "", "{}"].includes(node.custom_headers_json)
++  )
++    throw new Error("private_lane_trust_required");
++  const flags = db
++    .prepare(
++      "SELECT override_value FROM model_capability_overrides WHERE provider=? AND model_id=? AND override_key='fully_trusted'"
++    )
++    .all(node.id, PRIVATE_LANE_MODEL) as Array<{ override_value: string }>;
++  // Only the canonical literal written by the strict boolean API grants admission.
++  if (flags.length !== 1 || flags[0].override_value !== "true")
++    throw new Error("private_lane_trust_required");
++  const connections = db
++    .prepare("SELECT id FROM provider_connections WHERE provider=? AND is_active=1")
++    .all(node.id) as Array<{ id: string }>;
++  if (connections.length !== 1) throw new Error("private_lane_trust_required");
++  return { provider: node.id, connectionId: connections[0].id, model: PRIVATE_LANE_MODEL };
++}
+diff --git a/src/proxy.ts b/src/proxy.ts
+index b99a0789d..7bc50619f 100644
+--- a/src/proxy.ts
++++ b/src/proxy.ts
+@@ -38,8 +38,13 @@ export const config = {
+     "/dashboard/:path*",
+     "/home",
+     "/home/:path*",
+-    "/api/:path*",
+-    "/:v1seg([vV]1)/:path*",
++    // The private lane authenticates independently before its bounded streaming read. Middleware clones
++    // and awaits HTTP EOF before entering the handler, defeating its 64-KiB/10-second gate.
++    // Next selects middleware on raw OR decoded paths, then decodes filesystem routes.
++    // Spell literal ASCII percent-encodings too (including slashes), not broad path exceptions.
++    "/api",
++    "/api/:path((?!(?:v|%76)(?:1|%31)(?:/|%2[fF])(?:p|%70)(?:r|%72)(?:i|%69)(?:v|%76)(?:a|%61)(?:t|%74)(?:e|%65)(?:/|%2[fF])(?:c|%63)(?:h|%68)(?:a|%61)(?:t|%74)(?:/|%2[fF])(?:c|%63)(?:o|%6[fF])(?:m|%6[dD])(?:p|%70)(?:l|%6[cC])(?:e|%65)(?:t|%74)(?:i|%69)(?:o|%6[fF])(?:n|%6[eE])(?:s|%73)(?:(?:/|%2[fF]))?$).*)",
++    "/:v1seg([vV]1)/:path((?!(?:[vV]1/)?(?:p|%70)(?:r|%72)(?:i|%69)(?:v|%76)(?:a|%61)(?:t|%74)(?:e|%65)(?:/|%2[fF])(?:c|%63)(?:h|%68)(?:a|%61)(?:t|%74)(?:/|%2[fF])(?:c|%63)(?:o|%6[fF])(?:m|%6[dD])(?:p|%70)(?:l|%6[cC])(?:e|%65)(?:t|%74)(?:i|%69)(?:o|%6[fF])(?:n|%6[eE])(?:s|%73)(?:(?:/|%2[fF]))?$).*)",
+     "/:v1seg([vV]1)",
+     "/:v1betaseg([vV]1[bB][eE][tT][aA])/:path*",
+     "/:v1betaseg([vV]1[bB][eE][tT][aA])",
+diff --git a/tests/unit/authz/proxy-contract.test.ts b/tests/unit/authz/proxy-contract.test.ts
+index 438eb0f24..cc3e5c59f 100644
+--- a/tests/unit/authz/proxy-contract.test.ts
++++ b/tests/unit/authz/proxy-contract.test.ts
+@@ -52,7 +52,7 @@ test("proxy.ts delegates to runAuthzPipeline with enforce: true", () => {
+   );
+ });
+ 
+-test("proxy.ts config.matcher covers every /api/* route plus dashboard and v1 aliases", () => {
++test("proxy.ts config.matcher covers general APIs plus dashboard and v1 aliases, except self-authorized private-lane streaming", () => {
+   const content = fs.readFileSync("src/proxy.ts", "utf8");
+   // Required prefixes — drop one and the corresponding routes go unguarded.
+   // The client-API aliases use a case-insensitive path-to-regexp group
+@@ -60,9 +60,10 @@ test("proxy.ts config.matcher covers every /api/* route plus dashboard and v1 al
+   // GHSA-jvqc-mp9f-q936 and tests/unit/authz/proxy-matcher-case.test.ts for the
+   // semantic (compiled-matcher) coverage assertions.
+   const requiredMatchers = [
+-    '"/api/:path*"',
++    '"/api"',
++    '"/api/:path((?!',
+     '"/dashboard/:path*"',
+-    '"/:v1seg([vV]1)/:path*"',
++    '"/:v1seg([vV]1)/:path((?!',
+     '"/:v1betaseg([vV]1[bB][eE][tT][aA])/:path*"',
+     '"/:chatseg([cC][hH][aA][tT])/:path*"',
+     '"/:respseg([rR][eE][sS][pP][oO][nN][sS][eE][sS])/:path*"',
+diff --git a/tests/unit/authz/proxy-matcher-case.test.ts b/tests/unit/authz/proxy-matcher-case.test.ts
+index 4069fd9b6..d6214c91e 100644
+--- a/tests/unit/authz/proxy-matcher-case.test.ts
++++ b/tests/unit/authz/proxy-matcher-case.test.ts
+@@ -66,6 +66,47 @@ test("proxy matcher covers uppercase / mixed-case client aliases (GHSA-jvqc-mp9f
+   }
+ });
+ 
++test("only the exact self-authorized private-lane handler bypasses middleware body buffering", () => {
++  for (const p of [
++    "/api/v1/private/chat/completions",
++    "/api/v1/private/chat/completions/",
++    "/v1/private/chat/completions",
++    "/V1/private/chat/completions/",
++    "/v1/v1/private/chat/completions",
++    "/V1/V1/private/chat/completions/",
++  ])
++    assert.equal(isMatchedByProxy(p), false, p);
++  for (const p of [
++    "/api",
++    "/api/v1/private/chat/completions/other",
++    "/api/v1/private/chat/completionsX",
++    "/api/v1/private/chat",
++    "/api/v1/private",
++    "/api/keys",
++    "/v1/v1%2fprivate/chat/completions",
++    "/v1/v1/chat/completions",
++    "/V1/v1/chat/completions",
++    "/v1/private/chat/completions/other",
++    "/v1/private/chat/completionsX",
++    "/v1beta/private/chat/completions",
++    "/V1BETA/private/chat/completions",
++  ])
++    assert.equal(isMatchedByProxy(p), true, p);
++});
++
++test("single ASCII percent-encodings of the exact streaming endpoint do not reintroduce middleware cloning", () => {
++  for (const pathname of ["/api/v1/private/chat/completions", "/v1/private/chat/completions"]) {
++    for (let i = pathname.indexOf("/", 1) + 1; i < pathname.length; i++) {
++      const hex = pathname.charCodeAt(i).toString(16);
++      for (const encoded of [hex, hex.toUpperCase()]) {
++        const p = pathname.slice(0, i) + "%" + encoded + pathname.slice(i + 1);
++        assert.equal(isMatchedByProxy(p), false, p);
++        assert.equal(isMatchedByProxy(decodeURIComponent(p)), false, p);
++      }
++    }
++  }
++});
++
+ test("classifyRoute treats uppercase client aliases as CLIENT_API, not management fallback", () => {
+   assert.equal(classifyRoute("/V1/chat/completions", "POST").routeClass, "CLIENT_API");
+   assert.equal(classifyRoute("/V1BETA/models", "GET").routeClass, "CLIENT_API");
+diff --git a/tests/unit/inner-failover-key-policy.test.mjs b/tests/unit/inner-failover-key-policy.test.mjs
+new file mode 100644
+index 000000000..666ca8a0c
+--- /dev/null
++++ b/tests/unit/inner-failover-key-policy.test.mjs
+@@ -0,0 +1,16 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++
++// ponytail: static contract for the two actual call sites; live/bundled routing
++// needs its own runtime check. No evaluation, fake source execution, or credentials.
++const source = readFileSync(new URL('../../open-sse/handlers/chatCore.ts', import.meta.url), 'utf8');
++for (const provider of ['codex', 'antigravity']) {
++  const call = source.match(new RegExp(`await getProviderCredentials\\(\\s*"${provider}",([\\s\\S]*?)\\)\\.catch\\(\\(\\) => null\\)`));
++  assert.ok(call, `${provider} real inner selector call exists`);
++  test(`${provider} inner retry retains key policy, requested model, and excluded accounts`, () => {
++    const excluded = provider === 'codex' ? 'codexExcludedIds' : 'antigravityByopExcludedIds';
++    assert.equal(call[1].replace(/\s+/g, '').replace(/,}/g, '}'),
++      `null,apiKeyInfo?.allowedConnections??null,modelToCall||model||requestedModel||null,{excludeConnectionIds:[...${excluded}]}`);
++  });
++}
+diff --git a/tests/unit/private-lane-chat.test.ts b/tests/unit/private-lane-chat.test.ts
+new file mode 100644
+index 000000000..f6768e651
+--- /dev/null
++++ b/tests/unit/private-lane-chat.test.ts
+@@ -0,0 +1,503 @@
++import { after, beforeEach, test, type TestContext } from "node:test";
++import assert from "node:assert/strict";
++import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
++import path from "node:path";
++import os from "node:os";
++import http from "node:http";
++import { EventEmitter } from "node:events";
++import { Readable } from "node:stream";
++
++const dir = mkdtempSync(path.join(os.tmpdir(), "private-lane-chat-"));
++process.env.DATA_DIR = dir;
++process.env.OMC_PRIVATE_LANE_MODEL = "Qwen3.8-27B-FP8";
++process.env.OMC_PRIVATE_LANE_BASE_URL = "http://192.0.2.10:8000/v1";
++process.env.API_KEY_SECRET = "private-lane-synthetic-test-only-not-a-production-secret";
++const core = await import("../../src/lib/db/core.ts");
++const keys = await import("../../src/lib/db/apiKeys.ts");
++const nodes = await import("../../src/lib/db/providers/nodes.ts");
++const flags = await import("../../src/lib/db/modelCapabilityOverrides.ts");
++const { GET, POST } = await import("../../src/app/api/v1/private/chat/completions/route.ts");
++const provider = "openai-compatible-chat-private-lane-test";
++const target = "vllm/Qwen3.8-27B-FP8";
++let key: string;
++const input = {
++  model: target,
++  messages: [{ role: "user", content: "synthetic sample" }],
++  stream: false,
++  max_tokens: 64,
++};
++const output = {
++  model: "Qwen3.8-27B-FP8",
++  choices: [
++    {
++      message: {
++        role: "assistant",
++        content: "synthetic result",
++        reasoning_content: "synthetic reasoning",
++      },
++      index: 0,
++      finish_reason: "stop",
++    },
++  ],
++  usage: { prompt_tokens: 4, completion_tokens: 8, total_tokens: 12 },
++};
++
++beforeEach(async () => {
++  core.resetDbInstance();
++  rmSync(dir, { recursive: true, force: true });
++  mkdirSync(dir, { recursive: true });
++  await nodes.createProviderNode({
++    id: provider,
++    prefix: "vllm",
++    name: "Local",
++    type: "openai-compatible",
++    baseUrl: "http://192.0.2.10:8000/v1",
++  });
++  core
++    .getDbInstance()
++    .prepare(
++      "INSERT INTO provider_connections (id,provider,is_active,created_at,updated_at) VALUES (?,?,1,datetime('now'),datetime('now'))"
++    )
++    .run("local-connection", provider);
++  key = (await keys.createApiKey("synthetic", "synthetic-machine")).key;
++});
++after(() => {
++  core.resetDbInstance();
++  rmSync(dir, { recursive: true, force: true });
++});
++function grant() {
++  flags.setModelCapabilityOverride(`${provider}/Qwen3.8-27B-FP8`, "fully_trusted", true);
++}
++function req(method = "POST", body: unknown = input, extra: Record<string, string> = {}) {
++  return new Request("http://127.0.0.1:20129/v1/private/chat/completions", {
++    method,
++    headers: {
++      authorization: `Bearer ${key}`,
++      "content-type": "application/json",
++      "x-omc-model": target,
++      "x-omc-source-method": "GET",
++      ...extra,
++    },
++    ...(method === "GET" ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
++  });
++}
++test("chat-disabled and concrete deny-listed keys refuse both private-lane route forms before body", async (t) => {
++  grant();
++  let reads = 0;
++  const transport = t.mock.method(http, "request", () => {
++    throw new Error("must not dispatch");
++  });
++  for (const restriction of ["endpoint", "model"]) {
++    const candidate = await keys.createApiKey("synthetic restricted", "synthetic-machine");
++    core
++      .getDbInstance()
++      .prepare(
++        restriction === "endpoint"
++          ? "UPDATE api_keys SET allowed_endpoints='[\"embeddings\"]' WHERE id=?"
++          : "UPDATE api_keys SET blocked_models='[\"vllm/*\"]' WHERE id=?"
++      )
++      .run(candidate.id);
++    for (const path of [
++      "/v1/private/chat/completions",
++      "/api/v1/private/chat/completions",
++      "/v1/v1/private/chat/completions",
++      "/V1/private/chat/completions",
++    ]) {
++      const request = new Request(
++        `http://localhost${path}`,
++        req("POST", input, { authorization: `Bearer ${candidate.key}` })
++      );
++      Object.defineProperty(request, "body", {
++        get() {
++          reads++;
++          throw new Error("must not read");
++        },
++      });
++      assert.equal((await POST(request)).status, 403);
++    }
++  }
++  assert.equal(reads, 0);
++  assert.equal(transport.mock.callCount(), 0);
++});
++
++test("revocation stays authoritative after isActive re-enable and before any body access", async (t) => {
++  grant();
++  const transport = t.mock.method(http, "request", () => {
++    throw new Error("must not dispatch");
++  });
++  for (const reenable of [true, false]) {
++    const candidate = await keys.createApiKey("synthetic revoked", "synthetic-machine");
++    if (reenable) {
++      await keys.revokeApiKey(candidate.id);
++      await keys.updateApiKeyPermissions(candidate.id, { isActive: true });
++    } else
++      core
++        .getDbInstance()
++        .prepare("UPDATE api_keys SET revoked_at=? WHERE id=?")
++        .run("2000-01-01T00:00:00Z", candidate.id);
++    assert.equal(await keys.validateApiKey(candidate.key), false);
++    for (const method of ["GET", "POST"]) {
++      const request = req(method, input, { authorization: `Bearer ${candidate.key}` });
++      Object.defineProperty(request, "body", {
++        get() {
++          throw new Error("must not read");
++        },
++      });
++      assert.equal((await (method === "GET" ? GET(request) : POST(request))).status, 403);
++    }
++  }
++  assert.equal(transport.mock.callCount(), 0);
++});
++
++test("body timeout and request abort cannot accept a valid but unfinished JSON prefix", async (t) => {
++  grant();
++  const transport = t.mock.method(http, "request", () => {
++    throw new Error("must not dispatch");
++  });
++  for (const abort of [false, true]) {
++    let cancelled = false;
++    const controller = new AbortController();
++    const request = new Request(req(), {
++      body: new ReadableStream({
++        start(stream) {
++          stream.enqueue(Buffer.from(JSON.stringify(input)));
++        },
++        cancel() {
++          cancelled = true;
++        },
++      }),
++      signal: controller.signal,
++      duplex: "half",
++    } as RequestInit);
++    const timer = abort ? setTimeout(() => controller.abort(), 10) : undefined;
++    try {
++      assert.equal((await POST(request)).status, 400);
++      assert.ok(cancelled);
++    } finally {
++      clearTimeout(timer);
++    }
++  }
++  assert.equal(transport.mock.callCount(), 0);
++});
++
++function untouched() {
++  const db = core.getDbInstance();
++  for (const table of [
++    "call_logs",
++    "semantic_cache",
++    "usage_history",
++    "agentic_conversations",
++    "conversation_turn_nodes",
++    "webhook_deliveries",
++  ]) {
++    assert.equal(
++      (db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n,
++      0,
++      table
++    );
++  }
++}
++
++test("missing/false/unknown trust, cloud and writes refuse before body or network", async (t) => {
++  let network = 0;
++  let reads = 0;
++  t.mock.method(http, "request", () => {
++    network++;
++    throw new Error("must not connect");
++  });
++  for (const extra of [
++    {},
++    { "x-omc-model": "openai/gpt-4o" },
++    { "x-omc-model": "" },
++    { "x-omc-source-method": "POST" },
++  ]) {
++    const request = req("POST", input, extra);
++    Object.defineProperty(request, "body", {
++      get() {
++        reads++;
++        throw new Error("must not read");
++      },
++    });
++    assert.ok((await POST(request)).status >= 400);
++  }
++  grant();
++  assert.ok((await POST(req("POST", input, { "x-omc-model": "openai/gpt-4o" }))).status >= 400);
++  assert.equal(reads, 0);
++  assert.equal(network, 0);
++  untouched();
++});
++
++test("GET admission is payload-free and authenticated even with general local mode", async (t) => {
++  grant();
++  t.mock.method(http, "request", () => {
++    throw new Error("must not connect");
++  });
++  const allowed = await GET(req("GET"));
++  assert.deepEqual(await allowed.json(), { admitted: true, model: target, source_method: "GET" });
++  assert.equal(allowed.headers.get("cache-control"), "no-store");
++  assert.equal((await GET(req("GET", input, { authorization: "Bearer invalid" }))).status, 403);
++  assert.equal((await GET(req("GET", input, { authorization: "" }))).status, 403);
++  untouched();
++});
++
++test("invalid JSON, duplicate model, tools, wrong body model and oversize refuse with zero network", async (t) => {
++  grant();
++  let network = 0;
++  t.mock.method(http, "request", () => {
++    network++;
++    throw new Error("must not connect");
++  });
++  for (const body of [
++    "{",
++    JSON.stringify(input).replace('"model":', '"model":"openai/gpt-4o","model":'),
++    { ...input, tools: [] },
++    { ...input, model: "openai/gpt-4o" },
++    { ...input, stream: true },
++    { ...input, max_tokens: 2049 },
++    { ...input, messages: [{ role: "tool", content: "synthetic" }] },
++    { ...input, messages: [{ role: "user", content: "x".repeat(70000) }] },
++  ]) {
++    assert.equal((await POST(req("POST", body))).status, 400);
++  }
++  assert.equal(network, 0);
++  untouched();
++});
++
++test("synthetic fixed local transport has no proxy, credential forwarding, logs, caches or fallback", async (t) => {
++  grant();
++  let network = 0;
++  t.mock.method(http, "request", (...args: unknown[]) => {
++    network++;
++    assert.equal(args[0], "http://192.0.2.10:8000/v1/chat/completions");
++    const opts = args[1] as http.RequestOptions;
++    assert.equal(opts.agent, false);
++    assert.equal((opts.headers as Record<string, string>).authorization, undefined);
++    const cb = args[2] as (res: http.IncomingMessage) => void;
++    const socket = Object.assign(new EventEmitter(), {
++      end(payload: string) {
++        assert.deepEqual(JSON.parse(payload), { ...input, model: "Qwen3.8-27B-FP8" });
++        queueMicrotask(() =>
++          cb(
++            Object.assign(Readable.from([Buffer.from(JSON.stringify(output))]), {
++              statusCode: 200,
++            }) as http.IncomingMessage
++          )
++        );
++      },
++    });
++    return socket as unknown as http.ClientRequest;
++  });
++  const response = await POST(req());
++  assert.equal(response.status, 200);
++  assert.deepEqual(await response.json(), output);
++  assert.equal(network, 1);
++  untouched();
++});
++
++function mockLocalReply(t: TestContext, reply: () => unknown) {
++  t.mock.method(http, "request", (...args: unknown[]) => {
++    assert.equal(args[0], "http://192.0.2.10:8000/v1/chat/completions");
++    const callback = args[2] as (res: http.IncomingMessage) => void;
++    return Object.assign(new EventEmitter(), {
++      end() {
++        queueMicrotask(() =>
++          callback(
++            Object.assign(Readable.from([Buffer.from(JSON.stringify(reply()))]), {
++              statusCode: 200,
++            }) as http.IncomingMessage
++          )
++        );
++      },
++    }) as unknown as http.ClientRequest;
++  });
++}
++
++test("SGLang known metadata and zero tools normalize without forwarding extensions", async (t) => {
++  grant();
++  let reply: unknown;
++  mockLocalReply(t, () => reply);
++  const metadata = [
++    { matched_stop: null }, // Actual installed upstream diagnostic: HTTP200 -> old parser503.
++    { matched_stop: 151645 },
++    { matched_stop: "synthetic stop" },
++    { hidden_states: null },
++    { prompt_token_ids: null },
++    { response_token_ids: null },
++    { meta_info: null },
++    {
++      matched_stop: null,
++      hidden_states: null,
++      prompt_token_ids: null,
++      response_token_ids: null,
++      meta_info: null,
++    },
++  ];
++  for (const extension of metadata) {
++    for (const tools of [undefined, null, []]) {
++      const choice = { ...output.choices[0], ...extension };
++      reply = {
++        ...output,
++        choices: [
++          {
++            ...choice,
++            message: { ...choice.message, ...(tools === undefined ? {} : { tool_calls: tools }) },
++          },
++        ],
++      };
++      const response = await POST(req());
++      assert.equal(response.status, 200);
++      assert.deepEqual(await response.json(), {
++        ...output,
++        choices: [
++          {
++            ...output.choices[0],
++            message: {
++              ...output.choices[0].message,
++              ...(tools === undefined ? {} : { tool_calls: null }),
++            },
++          },
++        ],
++      });
++    }
++  }
++  untouched();
++});
++
++test("SGLang malformed or unknown metadata and tool outcomes still refuse", async (t) => {
++  grant();
++  let reply: unknown;
++  mockLocalReply(t, () => reply);
++  const choices = [
++    {
++      ...output.choices[0],
++      message: { ...output.choices[0].message, tool_calls: [{ type: "function" }] },
++    },
++    { ...output.choices[0], finish_reason: "tool_calls" },
++    { ...output.choices[0], finish_reason: "function_call" },
++    { ...output.choices[0], finish_reason: "unknown" },
++    { ...output.choices[0], message: { ...output.choices[0].message, function_call: null } },
++    { ...output.choices[0], message: { ...output.choices[0].message, tool_calls: false } },
++    ...[true, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, {}, [], "x".repeat(32769)].map(
++      (matched_stop) => ({ ...output.choices[0], matched_stop })
++    ),
++    ...["hidden_states", "prompt_token_ids", "response_token_ids", "meta_info"].map((name) => ({
++      ...output.choices[0],
++      [name]: {},
++    })),
++    { ...output.choices[0], unknown_extension: null },
++    { ...output.choices[0], message: { ...output.choices[0].message, unknown_extension: null } },
++  ];
++  for (const choice of choices) {
++    reply = { ...output, choices: [choice] };
++    const response = await POST(req());
++    assert.equal(response.status, 503);
++    assert.equal(response.headers.get("cache-control"), "no-store");
++    assert.deepEqual(await response.json(), {
++      error: {
++        message: "private_lane_trust_required",
++        type: "server_error",
++        code: "service_unavailable",
++      },
++    });
++  }
++  untouched();
++});
++
++test("revoked flag after parsing starts refuses before upstream", async (t) => {
++  grant();
++  let network = 0;
++  t.mock.method(http, "request", () => {
++    network++;
++    throw new Error("must not connect");
++  });
++  const request = req();
++  const body = request.body;
++  Object.defineProperty(request, "body", {
++    get() {
++      flags.setModelCapabilityOverride(`${provider}/Qwen3.8-27B-FP8`, "fully_trusted", false);
++      return body;
++    },
++  });
++  assert.equal((await POST(request)).status, 503);
++  assert.equal(network, 0);
++  untouched();
++});
++
++test("owned concurrency slot refuses another body and releases after cancellation", async (t) => {
++  grant();
++  let started!: () => void;
++  const pending = new Promise<void>((resolve) => {
++    started = resolve;
++  });
++  t.mock.method(http, "request", (...args: unknown[]) => {
++    const options = args[1] as { signal: AbortSignal };
++    const socket = Object.assign(new EventEmitter(), {
++      end() {
++        started();
++      },
++    });
++    options.signal.addEventListener(
++      "abort",
++      () => socket.emit("error", new Error("synthetic cancelled")),
++      { once: true }
++    );
++    return socket as unknown as http.ClientRequest;
++  });
++  const controller = new AbortController();
++  const first = POST(new Request(req(), { signal: controller.signal }));
++  await pending;
++  const second = req();
++  Object.defineProperty(second, "body", {
++    get() {
++      throw new Error("busy must not read");
++    },
++  });
++  assert.equal((await POST(second)).status, 503);
++  controller.abort();
++  assert.equal((await first).status, 503);
++  assert.equal((await GET(req("GET"))).status, 200);
++  untouched();
++});
++
++test("unavailable local, redirect, wrong-model/error/oversize replies return fixed refusal without fallback", async (t) => {
++  grant();
++  let network = 0;
++  let reply: unknown = null;
++  let status = 200;
++  t.mock.method(http, "request", (...args: unknown[]) => {
++    network++;
++    if (reply === null) throw new Error("synthetic private diagnostic must not escape");
++    const cb = args[2] as (res: http.IncomingMessage) => void;
++    return Object.assign(new EventEmitter(), {
++      end() {
++        queueMicrotask(() =>
++          cb(
++            Object.assign(
++              Readable.from([
++                Buffer.from(typeof reply === "string" ? reply : JSON.stringify(reply)),
++              ]),
++              { statusCode: status }
++            ) as http.IncomingMessage
++          )
++        );
++      },
++    }) as unknown as http.ClientRequest;
++  });
++  for (const value of [
++    null,
++    { ...output, model: "cloud" },
++    { error: "synthetic private diagnostic" },
++    "x".repeat(262145),
++    "redirect",
++  ]) {
++    reply = value;
++    status = value === "redirect" ? 302 : 200;
++    const response = await POST(req());
++    assert.equal(response.status, 503);
++    const text = await response.text();
++    assert.ok(!text.includes("synthetic private diagnostic"));
++    assert.ok(!text.includes("at /"));
++  }
++  assert.equal(network, 5);
++  untouched();
++});
+diff --git a/tests/unit/private-lane-framework-body.test.mjs b/tests/unit/private-lane-framework-body.test.mjs
+new file mode 100644
+index 000000000..982e9a1cd
+--- /dev/null
++++ b/tests/unit/private-lane-framework-body.test.mjs
+@@ -0,0 +1,228 @@
++// Adapted from retained Sol V3 probe: select middleware using the ACTUAL installed Next matcher.
++// The original forced-middleware probe is unchanged in review evidence; its body-refusal assertion remains here.
++import { test, after } from "node:test";
++import assert from "node:assert/strict";
++import http from "node:http";
++import { once } from "node:events";
++import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
++import path from "node:path";
++import os from "node:os";
++import { pathToFileURL } from "node:url";
++const load = (p) => import(pathToFileURL(path.join(process.cwd(), p)).href);
++const dir = mkdtempSync(path.join(os.tmpdir(), "sol-v3-framework-"));
++process.env.DATA_DIR = dir;
++process.env.OMC_PRIVATE_LANE_MODEL = "Qwen3.8-27B-FP8";
++process.env.OMC_PRIVATE_LANE_BASE_URL = "http://192.0.2.10:8000/v1";
++process.env.API_KEY_SECRET = "synthetic-v3-framework-only";
++process.env.REQUIRE_API_KEY = "true";
++process.env.REDIS_URL = "";
++const core = await load("src/lib/db/core.ts");
++const keys = await load("src/lib/db/apiKeys.ts");
++const nodes = await load("src/lib/db/providers/nodes.ts");
++const flags = await load("src/lib/db/modelCapabilityOverrides.ts");
++const lane = await load("src/lib/db/privateLane.ts");
++const route = await load("src/app/api/v1/private/chat/completions/route.ts");
++const { runAuthzPipeline } = await load("src/server/authz/pipeline.ts");
++const { config } = await load("src/proxy.ts");
++const { getMiddlewareMatchers } = await load(
++  "node_modules/next/dist/build/analysis/get-page-static-info.js"
++);
++const { getMiddlewareRouteMatcher } = await load(
++  "node_modules/next/dist/shared/lib/router/utils/middleware-route-matcher.js"
++);
++const matchers = getMiddlewareMatchers(config.matcher, { basePath: "" });
++const match = getMiddlewareRouteMatcher(matchers);
++await load("node_modules/next/dist/server/node-environment.js");
++const { setupFsCheck } = await load("node_modules/next/dist/server/lib/router-utils/filesystem.js");
++const discovery = path.join(dir, "discovery"),
++  canonical = "/api/v1/private/chat/completions";
++function put(file, data) {
++  const p = path.join(discovery, ".next", file);
++  mkdirSync(path.dirname(p), { recursive: true });
++  writeFileSync(p, typeof data === "string" ? data : JSON.stringify(data));
++}
++put("BUILD_ID", "synthetic-only");
++put("routes-manifest.json", {
++  dataRoutes: [],
++  dynamicRoutes: [],
++  redirects: [],
++  headers: [],
++  onMatchHeaders: [],
++  rewrites: { beforeFiles: [], afterFiles: [], fallback: [] },
++});
++put("prerender-manifest.json", { preview: { previewModeId: "synthetic-preview-id" } });
++put("server/pages-manifest.json", {});
++put("server/functions-config-manifest.json", { functions: { "/_middleware": { matchers } } });
++put("app-path-routes-manifest.json", { [canonical + "/route"]: canonical });
++const filesystem = await setupFsCheck({
++  dev: false,
++  dir: discovery,
++  config: { distDir: ".next", basePath: "", output: "standalone", experimental: {} },
++});
++const { default: serverModule } = await load("node_modules/next/dist/server/next-server.js");
++const NextServer = serverModule.default ?? serverModule;
++const { adapter } = await load("node_modules/next/dist/server/web/adapter.js");
++const { getCloneableBody } = await load("node_modules/next/dist/server/body-streams.js");
++const { NodeNextRequest, NodeNextResponse } = await load(
++  "node_modules/next/dist/server/base-http/node.js"
++);
++const { addRequestMeta } = await load("node_modules/next/dist/server/request-meta.js");
++const { NextRequestAdapter, signalFromNodeResponse } = await load(
++  "node_modules/next/dist/server/web/spec-extension/adapters/next-request.js"
++);
++after(() => {
++  core.resetDbInstance();
++  rmSync(dir, { recursive: true, force: true });
++});
++const provider = "openai-compatible-chat-v4-framework";
++await nodes.createProviderNode({
++  id: provider,
++  prefix: "vllm",
++  name: "Synthetic",
++  type: "openai-compatible",
++  baseUrl: "http://192.0.2.10:8000/v1",
++});
++core
++  .getDbInstance()
++  .prepare(
++    "INSERT INTO provider_connections (id,provider,is_active,created_at,updated_at) VALUES (?,?,1,datetime('now'),datetime('now'))"
++  )
++  .run("synthetic-v4-connection", provider);
++flags.setModelCapabilityOverride(`${provider}/${lane.PRIVATE_LANE_MODEL}`, "fully_trusted", true);
++const key = await keys.createApiKey("Synthetic v4", "synthetic-machine");
++for (const [upload, pathname] of [
++  ["oversized", "/v1/private/chat/completions"],
++  ["unfinished-valid-prefix", "/v1/private/chat/completions"],
++  ["oversized", "/api/v1/%70rivate/chat/completions"],
++  ["unfinished-valid-prefix", "/api/v1/private%2fchat/completions"],
++])
++  test(`private-lane actual framework selection refuses ${upload} on ${pathname} before EOF`, async (t) => {
++    let handlerEntries = 0,
++      middlewareFinished = false,
++      dispatches = 0,
++      received = false,
++      status = 0;
++    const native = http.request;
++    t.mock.method(http, "request", () => {
++      dispatches++;
++      throw new Error("no real dispatch authorized");
++    });
++    const middlewareModule = {
++      default: adapter,
++      proxy: async (r) => {
++        const result = await runAuthzPipeline(r, { enforce: true });
++        assert.equal(result.headers.get("x-middleware-next"), "1");
++        middlewareFinished = true;
++        return result;
++      },
++    };
++    // Build/module discovery alone is stubbed; installed Next runMiddleware/adapter/body finalization execute.
++    const facade = {
++      renderOpts: { previewProps: { previewModeId: "synthetic-nonempty-preview-id" } },
++      nextConfig: {
++        skipProxyUrlNormalize: true,
++        basePath: "",
++        experimental: { proxyClientMaxBodySize: 512 * 1024 * 1024 },
++      },
++      dev: true,
++      getMiddleware: async () => ({ page: "/src/proxy" }),
++      hasMiddleware: async () => true,
++      ensureMiddleware: async () => {},
++      getEdgeFunctionInfo: () => undefined,
++      loadNodeMiddleware: async () => middlewareModule,
++      getWaitUntil: () => undefined,
++    };
++    const works = [];
++    const errors = [];
++    const server = http.createServer((incoming, outgoing) => {
++      const request = new NodeNextRequest(incoming),
++        response = new NodeNextResponse(outgoing);
++      addRequestMeta(request, "initURL", `http://localhost${incoming.url}`);
++      addRequestMeta(request, "clonableBody", getCloneableBody(incoming, 512 * 1024 * 1024));
++      const work = (async () => {
++        // Mirrors Next's pre-runMiddleware matcher selection; private-lane is independently authenticated in its handler.
++        if (
++          match(incoming.url, incoming, {}) ||
++          match(decodeURIComponent(incoming.url), incoming, {})
++        )
++          await NextServer.prototype.runMiddleware.call(facade, {
++            request,
++            response,
++            parsed: { pathname: incoming.url, query: {} },
++          });
++        if (pathname.startsWith("/api/"))
++          assert.equal((await filesystem.getItem(pathname))?.itemPath, canonical);
++        handlerEntries++;
++        const r = NextRequestAdapter.fromNodeNextRequest(request, signalFromNodeResponse(outgoing));
++        const result = await route.POST(r);
++        outgoing.writeHead(result.status, Object.fromEntries(result.headers));
++        outgoing.end(await result.text());
++      })().catch((e) => {
++        errors.push(e.name);
++        outgoing.destroy();
++      });
++      works.push(work);
++    });
++    server.listen(0, "127.0.0.1");
++    await once(server, "listening");
++    const client = native.call(http, `http://127.0.0.1:${server.address().port}${pathname}`, {
++      method: "POST",
++      headers: {
++        authorization: `Bearer ${key.key}`,
++        "x-omc-model": lane.PRIVATE_LANE_TARGET,
++        "x-omc-source-method": "GET",
++        "content-type": "application/json",
++      },
++    });
++    client.on("error", () => {});
++    client.on("response", (r) => {
++      received = true;
++      status = r.statusCode;
++      r.resume();
++    });
++    try {
++      // Keep HTTP body unfinished for both the byte-cap and real 10-second deadline probe.
++      const body =
++        upload === "oversized"
++          ? "x".repeat(96 * 1024)
++          : JSON.stringify({
++              model: lane.PRIVATE_LANE_TARGET,
++              messages: [{ role: "user", content: "synthetic-only" }],
++              stream: false,
++              max_tokens: 1,
++            });
++      client.write(body);
++      await new Promise((r) => setTimeout(r, 11000));
++      console.log(
++        "installed-framework body observations",
++        JSON.stringify({
++          middlewareFinished,
++          handlerEntries,
++          received,
++          dispatches,
++          bytesSent: body.length,
++          waitMs: 11000,
++        })
++      );
++      assert.equal(
++        middlewareFinished,
++        false,
++        "special lane must not enter body-cloning middleware"
++      );
++      assert.equal(handlerEntries, 1, "authenticated streaming handler entered before HTTP EOF");
++      assert.equal(status, 400, "unfinished body refuses without upstream effects");
++      assert.equal(dispatches, 0);
++      assert.equal(
++        received,
++        true,
++        "body deadline must terminate request even before HTTP EOF (not wait for Next finalize)"
++      );
++    } finally {
++      client.end();
++      await Promise.all(works);
++      client.destroy();
++      server.closeAllConnections();
++      await new Promise((r) => server.close(r));
++      console.log("cleanup", JSON.stringify({ handlerEntries, dispatches, errors }));
++    }
++  });
+diff --git a/tests/unit/private-lane-fully-trusted.test.ts b/tests/unit/private-lane-fully-trusted.test.ts
+new file mode 100644
+index 000000000..9c93125e0
+--- /dev/null
++++ b/tests/unit/private-lane-fully-trusted.test.ts
+@@ -0,0 +1,147 @@
++import { after, beforeEach, test } from "node:test";
++import assert from "node:assert/strict";
++import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
++import os from "node:os";
++import path from "node:path";
++
++const dir = mkdtempSync(path.join(os.tmpdir(), "private-lane-trust-"));
++process.env.DATA_DIR = dir;
++process.env.OMC_PRIVATE_LANE_MODEL = "Qwen3.8-27B-FP8";
++process.env.OMC_PRIVATE_LANE_BASE_URL = "http://192.0.2.10:8000/v1";
++const core = await import("../../src/lib/db/core.ts");
++const overrides = await import("../../src/lib/db/modelCapabilityOverrides.ts");
++const nodes = await import("../../src/lib/db/providers/nodes.ts");
++const route = await import("../../src/app/api/model-capability-overrides/route.ts");
++const lane = await import("../../src/lib/db/privateLane.ts");
++const provider = "openai-compatible-chat-private-lane-test";
++const model = "Qwen3.8-27B-FP8";
++
++beforeEach(async () => {
++  core.resetDbInstance();
++  rmSync(dir, { recursive: true, force: true });
++  mkdirSync(dir, { recursive: true });
++  await nodes.createProviderNode({
++    id: provider,
++    prefix: "vllm",
++    name: "Local",
++    type: "openai-compatible",
++    baseUrl: "http://192.0.2.10:8000/v1",
++  });
++  core
++    .getDbInstance()
++    .prepare(
++      "INSERT INTO provider_connections (id,provider,is_active,created_at,updated_at) VALUES (?,?,1,datetime('now'),datetime('now'))"
++    )
++    .run("local-connection", provider);
++});
++after(() => {
++  core.resetDbInstance();
++  rmSync(dir, { recursive: true, force: true });
++});
++
++function set(value: unknown) {
++  return overrides.setModelCapabilityOverride(
++    `${provider}/${model}`,
++    "fully_trusted",
++    value as boolean
++  );
++}
++function admit(target = `vllm/${model}`, method = "GET") {
++  return lane.requirePrivateLane(target, method);
++}
++
++test("default/missing, unflagged, false, unknown/string/corrupt trust all deny", () => {
++  assert.throws(() => admit());
++  assert.equal(set(false), true);
++  assert.throws(() => admit());
++  for (const value of ["true", 1, null, {}, [true]]) assert.equal(set(value), false);
++  core
++    .getDbInstance()
++    .prepare("UPDATE model_capability_overrides SET override_value=?")
++    .run('"true"');
++  assert.throws(() => admit());
++  core
++    .getDbInstance()
++    .prepare("UPDATE model_capability_overrides SET override_value=?")
++    .run('{"value":false,"value":true}');
++  assert.throws(() => admit());
++  overrides.setModelCapabilityOverride(`${provider}/${model}`, "max_output_tokens", 2048);
++  assert.throws(() => admit(), "unrelated ordinary writer cannot normalize a denied trust row");
++});
++
++test("literal true admits only exact local node/model and GET Jira intent", () => {
++  assert.equal(set(true), true);
++  assert.deepEqual(admit(), { provider, connectionId: "local-connection", model });
++  for (const target of [
++    "openai/gpt-4o",
++    `codex/${model}`,
++    `vllm/${model}-other`,
++    `${provider}/${model}`,
++    "auto",
++  ])
++    assert.throws(() => admit(target));
++  for (const method of ["POST", "PATCH", "DELETE", "get", ""])
++    assert.throws(() => admit(undefined, method));
++  assert.equal(overrides.setModelCapabilityOverride("openai/gpt-4o", "fully_trusted", true), true);
++  assert.throws(() => admit("openai/gpt-4o"));
++});
++
++test("wrong endpoint, inactive/multiple connections and ambiguous prefix refuse", async () => {
++  set(true);
++  const db = core.getDbInstance();
++  db.prepare("UPDATE provider_nodes SET base_url=?").run("https://example.invalid/v1");
++  assert.throws(() => admit());
++  db.prepare("UPDATE provider_nodes SET base_url=?").run("http://192.0.2.10:8000/v1");
++  db.prepare("UPDATE provider_connections SET is_active=0").run();
++  assert.throws(() => admit());
++  db.prepare("UPDATE provider_connections SET is_active=1").run();
++  db.prepare(
++    "INSERT INTO provider_connections (id,provider,is_active,created_at,updated_at) VALUES (?,?,1,datetime('now'),datetime('now'))"
++  ).run("other", provider);
++  assert.throws(() => admit());
++  db.prepare("DELETE FROM provider_connections WHERE id='other'").run();
++  await nodes.createProviderNode({
++    id: "other-node",
++    prefix: "vllm",
++    name: "Other",
++    type: "openai-compatible",
++    baseUrl: "http://192.0.2.10:8000/v1",
++  });
++  assert.throws(() => admit());
++});
++
++test("management API strict bool, default false, canonical duplicate rejection and delete", async () => {
++  const patch = (body: string) =>
++    route.PATCH(
++      new Request("http://localhost/api/model-capability-overrides", {
++        method: "PATCH",
++        headers: { "content-type": "application/json" },
++        body,
++      })
++    );
++  for (const value of ["true", 1, null])
++    assert.equal(
++      (await patch(JSON.stringify({ target: `vllm/${model}`, key: "fully_trusted", value })))
++        .status,
++      400
++    );
++  assert.equal(
++    (await patch(`{"target":"vllm/${model}","key":"fully_trusted","value":false,"value":true}`))
++      .status,
++    400
++  );
++  assert.throws(() => admit());
++  assert.equal(
++    (await patch(JSON.stringify({ target: `vllm/${model}`, key: "fully_trusted", value: true })))
++      .status,
++    200
++  );
++  assert.equal(admit().provider, provider);
++  const removed = await route.DELETE(
++    new Request(
++      `http://localhost/api/model-capability-overrides?target=vllm/${model}&key=fully_trusted`
++    )
++  );
++  assert.equal(removed.status, 200);
++  assert.throws(() => admit());
++});
+diff --git a/tests/unit/prompt-aware-routing.test.ts b/tests/unit/prompt-aware-routing.test.ts
+new file mode 100644
+index 000000000..230944190
+--- /dev/null
++++ b/tests/unit/prompt-aware-routing.test.ts
+@@ -0,0 +1,199 @@
++import { test, after } from "node:test";
++import assert from "node:assert/strict";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++const dir = mkdtempSync(join(tmpdir(), "prompt-routing-"));
++process.env.DATA_DIR = dir;
++const { resetDbInstance } = await import("@/lib/db/core.ts");
++const { orderPromptAwareTargets } =
++  await import("@omniroute/open-sse/services/combo/promptAwareRouting.ts");
++const { resolveAutoStrategyOrder } =
++  await import("@omniroute/open-sse/services/combo/resolveAutoStrategy.ts");
++const { rrCounters } = await import("@omniroute/open-sse/services/combo/rrState.ts");
++const { getTaskFitnessWithSource, setUserFitnessOverride, clearUserFitnessOverride } =
++  await import("@omniroute/open-sse/services/autoCombo/taskFitness.ts");
++const { normalizeScoringWeights } =
++  await import("@omniroute/open-sse/services/autoCombo/scoring.ts");
++const { mapIntentToTaskType } = await import("@omniroute/open-sse/services/combo/autoStrategy.ts");
++const { classifyWithConfig } = await import("@omniroute/open-sse/services/intentClassifier.ts");
++import type {
++  AutoProviderCandidate,
++  ResolvedComboTarget,
++} from "@omniroute/open-sse/services/combo/types.ts";
++import type { ScoringWeights } from "@omniroute/open-sse/services/autoCombo/scoring.ts";
++
++after(() => {
++  resetDbInstance();
++  rmSync(dir, { recursive: true, force: true });
++});
++const target = (provider: string, model: string, connectionId = provider): ResolvedComboTarget => ({
++  kind: "model",
++  stepId: connectionId,
++  executionKey: `${provider}/${model}@${connectionId}`,
++  modelStr: `${provider}/${model}`,
++  provider,
++  providerId: provider,
++  connectionId,
++  weight: 1,
++  label: null,
++});
++const targets = [
++  target("codex", "gpt-5.5"),
++  target("bridge", "sonnet"),
++  target("neuralwatt", "glm-5.3-flash"),
++];
++const candidate = (t: ResolvedComboTarget): AutoProviderCandidate => ({
++  ...t,
++  model: t.modelStr.split("/").slice(1).join("/"),
++  quotaRemaining: 100,
++  quotaTotal: 100,
++  circuitBreakerState: "CLOSED",
++  costPer1MTokens: 1,
++  p95LatencyMs: 100,
++  latencyStdDev: 0,
++  errorRate: 0,
++});
++const base = () => ({
++  comboName: "test",
++  targets,
++  candidates: targets.map(candidate),
++  intent: "code",
++  intentEnabled: true,
++  taskType: "coding",
++  weights: normalizeScoringWeights({ taskFit: 1 } as ScoringWeights),
++});
++
++test("same eligible pool chooses code specialist vs analysis model based on prompt intent", () => {
++  const coding = orderPromptAwareTargets(base());
++  const analysis = orderPromptAwareTargets({
++    ...base(),
++    intent: "reasoning",
++    taskType: "analysis",
++  });
++  assert.equal(coding.targets[0].provider, "codex");
++  assert.equal(analysis.targets[0].provider, "bridge");
++  assert.match(coding.reason, /prompt-aware/);
++  assert.equal(new Set(coding.targets.map((t) => t.executionKey)).size, targets.length);
++});
++test("math maps to analysis rather than generic default", () => {
++  assert.equal(mapIntentToTaskType("math"), "analysis");
++});
++test("compatible Claude bare-family and Codex provider fitness use existing family table", () => {
++  assert.equal(
++    getTaskFitnessWithSource("sonnet", "analysis").score,
++    getTaskFitnessWithSource("claude-sonnet", "analysis").score
++  );
++  assert.equal(
++    getTaskFitnessWithSource("gpt-5.5", "coding", "codex").score,
++    getTaskFitnessWithSource("codex", "coding").score
++  );
++  assert.equal(getTaskFitnessWithSource("gpt-5.5", "coding", "openai").source, "wildcard_boost");
++});
++test("explicit fitness override retains precedence over alias heuristics", () => {
++  setUserFitnessOverride("sonnet", "analysis", 0.12);
++  assert.equal(getTaskFitnessWithSource("sonnet", "analysis").score, 0.12);
++  clearUserFitnessOverride("sonnet", "analysis");
++});
++test("unknown or disabled classification rotates the same pool", () => {
++  rrCounters.clear();
++  const a = orderPromptAwareTargets({ ...base(), intent: "medium" });
++  const b = orderPromptAwareTargets({ ...base(), intentEnabled: false });
++  assert.equal(a.targets[0].provider, "codex");
++  assert.equal(b.targets[0].provider, "bridge");
++  assert.match(b.reason, /round-robin/);
++});
++test("scoring failure rotates without returning blocked quotas or injected account", () => {
++  rrCounters.clear();
++  const input = base();
++  input.candidates[0].quotaCutoffBlocked = true;
++  input.candidates.push(candidate(target("unapproved", "model")));
++  const decision = orderPromptAwareTargets(input, () => {
++    throw new Error("scoring unavailable");
++  });
++  assert.deepEqual(
++    decision.targets.map((t) => t.provider),
++    ["bridge", "neuralwatt"]
++  );
++});
++test("empty/invalid scorer result falls back safely", () => {
++  assert.match(orderPromptAwareTargets(base(), () => []).reason, /round-robin/);
++  assert.match(
++    orderPromptAwareTargets(base(), () => [{ target: target("evil", "unknown"), score: 99 }])
++      .reason,
++    /round-robin/
++  );
++});
++test("round-robin tail remains after prompt-selected primary", () => {
++  rrCounters.clear();
++  const first = orderPromptAwareTargets(base());
++  const second = orderPromptAwareTargets(base());
++  assert.equal(first.targets[0].provider, "codex");
++  assert.equal(second.targets[0].provider, "codex");
++  assert.equal(first.targets.length, 3);
++});
++test("strict budget rejection is not caught as round-robin fallback", () => {
++  assert.throws(
++    () => orderPromptAwareTargets({ ...base(), budgetCap: 0.00001, budgetFallback: "strict" }),
++    /budget/i
++  );
++});
++test("budget excludes unaffordable smarter target", () => {
++  const input = base();
++  input.candidates[0].costPer1MTokens = 100;
++  const result = orderPromptAwareTargets({ ...input, budgetCap: 0.002, budgetFallback: "strict" });
++  assert.ok(result.targets.every((t) => t.provider !== "codex"));
++});
++test("account pin cannot be broadened by scorer/candidate builder", () => {
++  const t = target("codex", "gpt-5.5", "approved-account");
++  const result = orderPromptAwareTargets({
++    ...base(),
++    targets: [t],
++    candidates: [candidate(target("codex", "gpt-5.5", "other-account"))],
++  });
++  assert.equal(result.targets.length, 0);
++});
++test("substring false positives and vague writing do not classify every prompt as code", () => {
++  for (const prompt of [
++    "Define gravity",
++    "Write a poem about the ocean",
++    "Describe a classical constellation",
++  ]) {
++    assert.notEqual(classifyWithConfig(prompt, { enabled: true }), "code", prompt);
++  }
++  assert.equal(
++    classifyWithConfig("Write a Python function to parse JSON", { enabled: true }),
++    "code"
++  );
++});
++test("actual auto resolver uses prompt-aware primary and logs only decision metadata", async () => {
++  const logs: string[] = [];
++  const result = await resolveAutoStrategyOrder({
++    orderedTargets: targets,
++    body: { messages: [{ role: "user", content: "Implement a Python function" }] },
++    combo: {
++      name: "smart",
++      models: [],
++      config: {
++        auto: {
++          promptAwareRouting: true,
++          candidatePool: targets.map((t) => t.provider),
++          weights: { taskFit: 1 },
++        },
++      },
++    },
++    settings: null,
++    config: {},
++    resilienceSettings: { quotaPreflight: { enabled: false } } as never,
++    log: { info: (...args: unknown[]) => logs.push(args.join(" ")), warn() {} },
++    buildAutoCandidates: async () => targets.map(candidate),
++  });
++  assert.ok("orderedTargets" in result);
++  if ("orderedTargets" in result) {
++    assert.equal(result.orderedTargets[0].provider, "codex");
++    assert.equal(result.autoUsedExplicitRouter, true);
++  }
++  assert.ok(logs.some((line) => line.includes("prompt-aware")));
++  assert.ok(logs.every((line) => !line.includes("Implement a Python function")));
++});
+diff --git a/tests/unit/provider-models-v1-route.test.ts b/tests/unit/provider-models-v1-route.test.ts
+index c20eda354..79d9146c0 100644
+--- a/tests/unit/provider-models-v1-route.test.ts
++++ b/tests/unit/provider-models-v1-route.test.ts
+@@ -121,3 +121,45 @@ test("GET /v1/providers/:provider/models rejects non-matching connection-like st
+   const body = await res.json();
+   assert.equal(body.error?.code, "invalid_provider");
+ });
++
++test("GET /v1/providers/:provider/models lists a compatible node's models published under its prefix", async () => {
++  // Since #8327 the catalog publishes compatible-node models as `<prefix>/<model>` owned by the
++  // prefix, so filtering by the raw node id returned [] and the provider-page playground had no
++  // model to send ("Missing model").
++  const providersDb = await import("../../src/lib/db/providers.ts");
++  const modelsDb = await import("../../src/lib/db/models.ts");
++  const nodeId = "openai-compatible-chat-bbd954a5-0000-4000-8000-000000000000";
++  await providersDb.createProviderNode({
++    id: nodeId,
++    type: "openai-compatible",
++    name: "Local vLLM",
++    prefix: "local",
++    baseUrl: "http://192.0.2.10:8000/v1",
++    chatPath: "/v1/chat/completions",
++    modelsPath: "/v1/models",
++  });
++  const connection = await providersDb.createProviderConnection({
++    provider: nodeId,
++    authType: "apikey",
++    name: "main",
++    apiKey: "sk-test",
++    isActive: true,
++    testStatus: "active",
++    providerSpecificData: { baseUrl: "http://192.0.2.10:8000/v1" },
++  });
++  await modelsDb.replaceSyncedAvailableModelsForConnection(
++    nodeId,
++    (connection as { id: string }).id,
++    [{ id: "qwen3.8", name: "qwen3.8", source: "imported", supportedEndpoints: ["chat"] }]
++  );
++
++  (await import("../../src/app/api/v1/models/catalogCache.ts")).__resetCatalogBuilderRunsForTest();
++
++  const res = await callGET(nodeId);
++  assert.equal(res.status, 200);
++  const body = (await res.json()) as { data: Array<{ id: string }> };
++  assert.deepEqual(
++    body.data.map((m) => m.id),
++    ["qwen3.8"]
++  );
++});
+diff --git a/tests/unit/ui/model-capability-overrides-tab-9557.test.tsx b/tests/unit/ui/model-capability-overrides-tab-9557.test.tsx
+index 0a93d4644..7e9cbb719 100644
+--- a/tests/unit/ui/model-capability-overrides-tab-9557.test.tsx
++++ b/tests/unit/ui/model-capability-overrides-tab-9557.test.tsx
+@@ -56,6 +56,44 @@ afterEach(() => {
+ });
+ 
+ describe("ModelCapabilityOverridesTab (issue #9557)", () => {
++  it("fully_trusted defaults denied, ignores truthy strings, and saves literal checkbox booleans", async () => {
++    const catalog = {
++      local: {
++        id: "local",
++        displayPrefix: "vllm",
++        name: "Local",
++        models: [{ id: "Qwen3.8-27B-FP8", name: "Local model" }],
++      },
++    };
++    const fetchMock = vi.mocked(fetch);
++    fetchMock.mockImplementation((url: unknown, init?: RequestInit) => {
++      if (String(url).includes("/api/pricing/models"))
++        return Promise.resolve(jsonResponse(catalog));
++      const data =
++        init?.method === "PATCH"
++          ? JSON.parse(String(init.body))
++          : { target: "vllm/Qwen3.8-27B-FP8", key: "fully_trusted", value: "true" };
++      return Promise.resolve(jsonResponse({ overrides: [data] }));
++    });
++    render();
++    await act(async () => flush());
++    const checkbox = document.querySelector('input[type="checkbox"]') as HTMLInputElement;
++    expect(checkbox).toBeTruthy();
++    expect(checkbox.checked).toBe(false);
++    for (const expected of [true, false]) {
++      await act(async () => {
++        checkbox.click();
++        await flush();
++      });
++      expect(checkbox.checked).toBe(expected);
++      const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH");
++      expect(JSON.parse(String(writes.at(-1)?.[1]?.body))).toEqual({
++        target: "vllm/Qwen3.8-27B-FP8",
++        key: "fully_trusted",
++        value: expected,
++      });
++    }
++  });
+   it("uses a text input and sends the raw comma-separated reasoning_efforts string", async () => {
+     const catalog = {
+       codex: {
+diff --git a/tsconfig.typecheck-core.json b/tsconfig.typecheck-core.json
+index 3b37f28ef..1be17308b 100644
+--- a/tsconfig.typecheck-core.json
++++ b/tsconfig.typecheck-core.json
+@@ -35,7 +35,12 @@
+     "open-sse/translator/registry.ts",
+     "open-sse/handlers/responseSanitizer.ts",
+     "open-sse/handlers/responseTranslator.ts",
+-    "src/lib/tokenHealthCheckCursor.ts"
++    "src/lib/tokenHealthCheckCursor.ts",
++    "src/lib/db/privateLane.ts",
++    "src/lib/db/modelCapabilityOverrides.ts",
++    "src/app/api/model-capability-overrides/route.ts",
++    "src/app/api/v1/private/chat/completions/route.ts",
++    "open-sse/handlers/privateLaneChat.ts"
+   ],
+   "exclude": ["node_modules", ".next", "app.__qa_backup", "vscode-extension"]
+ }

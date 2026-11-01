@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+# Core gateway of this instance; uses only the instance user's existing OpenClaw config.
+description="OMC OpenClaw gateway"
+supervisor=supervise-daemon
+command="$HOME/.local/bin/openclaw"
+command_args="gateway"
+directory="@OMC_HOME@"
+respawn_delay=10
+respawn_max=0
+output_log="@OMC_DATA@/log/openclaw-gateway.log"
+error_log="@OMC_DATA@/log/openclaw-gateway.log"
+
+start_pre() {
+	export PATH="$HOME/.local/bin:$HOME/.local/node/bin:$PATH"
+	test -x "$command" && test -f "$HOME/.openclaw/openclaw.json"
+}

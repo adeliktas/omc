@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+# OMC team-cycle pool supervisor of one OMC instance: an OpenRC user service, run as the instance user.
+# Rendered by deploy/install.sh; started by deploy/setup.sh (step 7).
+description="OMC team-cycle pool supervisor"
+supervisor=supervise-daemon
+command="/usr/bin/python3"
+command_args="@OMC_HOME@/scripts/mc-team-pool.py"
+directory="@OMC_HOME@"
+respawn_delay=10
+respawn_max=0
+output_log="@OMC_DATA@/log/mc-claude-runner.log"
+error_log="@OMC_DATA@/log/mc-claude-runner.log"
+
+start_pre() {
+	set -a
+	. "@OMC_DATA@/.env"
+	. "@OMC_DATA@/etc/fleet.env"
+	set +a
+	test "$RUNNER_APPLY" = 1
+}

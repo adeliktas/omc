@@ -1,0 +1,56 @@
+# Production hardening overlay.
+#
+#   docker compose -f compose.yml -f compose.hardened.yml \
+#     -p openclaw-mission-control up -d
+#
+# Idea adapted from builderz-labs/mission-control's docker-compose.hardened.yml.
+#
+# Why this exists: when the host also serves other network segments (DHCP, forwarding), compose publishes backend, frontend and
+# omniroute on 0.0.0.0 — reachable from both LAN segments. Data routes return 401, but
+# /docs and /openapi.json are open and the OmniRoute dashboard is reachable.
+#
+# TRADE-OFF: this binds the operator surfaces to loopback. Reach them over an SSH tunnel:
+#   ssh -L 3000:127.0.0.1:3000 -L 8000:127.0.0.1:8000 <your-host>
+# Do not apply this overlay if you need LAN access to the UI and have accepted that exposure.
+
+services:
+  backend:
+    ports: !override
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    environment:
+      # Overlay default is strict; override CORS_ORIGINS in .env if the UI is tunnelled
+      # to a different origin. `*` (the current .env value) allows any LAN origin.
+      CORS_ORIGINS: ${CORS_ORIGINS_HARDENED:-http://localhost:3000}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    ports: !override
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  webhook-worker:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  omniroute:
+    # The gateway and agents reach OmniRoute over the docker bridge / host loopback,
+    # so it does not need a LAN binding.
+    ports: !override
+      - "127.0.0.1:20128:20128"
+      - "127.0.0.1:20129:20129"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+# Rootless Docker daemon of one OMC instance (an OpenRC user service; runs as the instance user).
+description="Rootless Docker daemon for this OMC instance"
+supervisor=supervise-daemon
+command="@EXTRAS@/dockerd-rootless.sh"
+output_log="${HOME}/.local/state/dockerd.log"
+error_log="${HOME}/.local/state/dockerd.log"
+export PATH="@EXTRAS@:${PATH}:/usr/sbin:/sbin"  # prepend: OpenRC needs its own helpers on PATH
+
+start_pre() {
+	mkdir -p "${HOME}/.local/state"
+}

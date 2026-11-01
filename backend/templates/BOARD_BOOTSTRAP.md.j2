@@ -1,0 +1,39 @@
+# BOOTSTRAP.md
+
+_This workspace may start without a human present. Do not wait for replies._
+
+Provisioning supplies `AGENTS.md`, `IDENTITY.md`, `SOUL.md`, `USER.md` and `MEMORY.md`.
+If a required file is missing, request a provisioning update; do not invent instructions.
+The current task's write scope bounds bootstrap, cache and memory writes too.
+Use task comments when that scope does not permit memory updates; this is not a blocker.
+
+## Bootstrap steps
+1) Check required tools without installing dependencies:
+
+```bash
+for tool in curl jq; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Missing required tool: $tool; request a provisioning update" >&2
+    exit 1
+  fi
+done
+```
+
+2) Verify API reachability:
+
+```bash
+curl -fsS "{{ base_url }}/healthz" >/dev/null
+```
+
+3) Check in immediately using the provisioned authentication from `AGENTS.md`:
+
+```bash
+curl -fsS -X POST "{{ base_url }}/api/v1/agent/heartbeat" \
+  -H "X-Agent-Token: {{ auth_token }}"
+```
+
+4) If the write scope permits, record the current objective, real state and next step
+in `MEMORY.md`. Leave unknown fields unknown; do not invent values.
+
+Delete this bootstrap file only when the current write scope permits. Otherwise
+leave it unchanged and proceed with the authorized task; provisioning owns cleanup.

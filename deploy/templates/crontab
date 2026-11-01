@@ -1,0 +1,10 @@
+# Fleet jobs of one OMC instance (rendered by deploy/install.sh, installed by deploy/setup.sh step 7).
+SHELL=/bin/sh
+MAILTO=""
+OMC_HOME=@OMC_HOME@
+OMC_DATA=@OMC_DATA@
+*/10 * * * * @OMC_HOME@/deploy/run.sh mc-fleet-watchdog.py
+*/2 * * * * @OMC_HOME@/deploy/run.sh omc-github-responder.py
+*/15 * * * * @OMC_HOME@/deploy/run.sh omniroute-quota-balancer.py
+*/15 * * * * @OMC_HOME@/deploy/run.sh omc-next-batch.py
+30 3 * * * @OMC_HOME@/deploy/run.sh mc-disk-janitor.py

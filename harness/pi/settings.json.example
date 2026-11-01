@@ -1,0 +1,11 @@
+{
+  "defaultProvider": "omniroute-api",
+  "defaultModel": "@MODEL_ID@",
+  "defaultThinkingLevel": "off",
+  "compaction": { "enabled": true, "reserveTokens": 24576, "keepRecentTokens": 6000 },
+  "packages": [
+    { "source": "git:github.com/DietrichGebert/ponytail", "extensions": ["+pi-extension/index.js"] },
+    "npm:pi-goal-x@0.32.3",
+    "git:github.com/obra/superpowers"
+  ]
+}

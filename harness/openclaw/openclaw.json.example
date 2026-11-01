@@ -1,0 +1,16 @@
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "omniroute": {
+        "api": "openai-completions",
+        "baseUrl": "http://localhost:@OMNIROUTE_PORT@/v1",
+        "apiKey": "@OMNIROUTE_API_KEY@",
+        "request": { "allowPrivateNetwork": true },
+        "models": [{ "id": "@MODEL_ID@", "name": "@MODEL_ID@", "contextWindow": 65536, "maxTokens": 16384 }]
+      }
+    }
+  },
+  "agents": { "defaults": { "model": "omniroute/@MODEL_ID@" } },
+  "gateway": { "port": 18789, "mode": "local", "bind": "lan", "auth": { "mode": "token", "token": "@GATEWAY_TOKEN@" } }
+}

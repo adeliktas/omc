@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+# OMC autonomous acceptance reviewer of one OMC instance: an OpenRC user service, run as the instance user.
+# Rendered by deploy/install.sh; started by deploy/setup.sh (step 7).
+description="OMC autonomous acceptance reviewer"
+supervisor=supervise-daemon
+command="/usr/bin/python3"
+command_args="@OMC_HOME@/scripts/mc-review-agent.py"
+directory="@OMC_HOME@"
+respawn_delay=5
+respawn_max=0
+output_log="@OMC_DATA@/log/mc-review-agent.log"
+error_log="@OMC_DATA@/log/mc-review-agent.log"
+
+start_pre() {
+	set -a
+	. "@OMC_DATA@/.env"
+	. "@OMC_DATA@/etc/fleet.env"
+	set +a
+	test "$RUNNER_APPLY" = 1
+}

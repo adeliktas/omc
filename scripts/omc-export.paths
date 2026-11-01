@@ -1,0 +1,62 @@
+# Paths that ship in the public OMC repo. fnmatch patterns on repo-relative paths ("*" crosses "/").
+# Later lines win; a leading "!" excludes. Resolved by scripts/omc_ship.py.
+backend/*
+frontend/*
+scripts/*
+deploy/*
+harness/*
+omniroute/*
+compose.yml
+compose.hardened.yml
+install.sh
+Makefile
+LICENSE
+README.md
+CONTRIBUTING.md
+AGENTS.md
+SECURITY.md
+THIRD_PARTY_NOTICES.md
+.gitignore
+.dockerignore
+.env.example
+.markdownlint-cli2.yaml
+.pre-commit-config.yaml
+docs/architecture/*
+docs/deployment/README.md
+docs/deployment/systemd/*
+docs/development/*
+docs/getting-started/*
+docs/reference/*
+docs/testing/*
+docs/troubleshooting/*
+docs/style-guide.md
+docs/openclaw_gateway_ws.md
+docs/openclaw_baseline_config.md
+docs/install.md
+docs/configuration.md
+docs/operations.md
+docs/harness.md
+# one-off, legacy or host-only scripts (production keeps them; they do not ship)
+!scripts/seed-*
+!scripts/verify-chart-pipeline.py
+!scripts/compare-lanes.py
+!scripts/pull-docs-from-host.sh
+!scripts/sync-docs-to-wiki.sh
+!scripts/mc-claude-code-p.*
+!scripts/reset-idle-sessions.py
+!scripts/mc-pipeline-test.py
+!scripts/check-task-token-cap.py
+!scripts/*.openrc
+!backend/tests/test_claude_code_p.py
+# host-only audit and hourly report scripts of the original deployment, with their tests
+!scripts/mc-audit.py
+!scripts/test_mc_audit.py
+!scripts/mc-health-report.sh
+!backend/tests/test_health_report_runtime_user.py
+# checks of the original host's private-source mask
+!scripts/check-private-source-mask.py
+!backend/tests/test_private_source_mask.py
+# docs that only lead into the private research notes
+!docs/development/license-provenance-procedure.md
+!docs/development/provenance-record-template.md
+!docs/development/research-backlog-boundaries.md

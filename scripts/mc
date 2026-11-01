@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""mc — command line client for Mission Control.
+
+Gap filled from builderz-labs/mission-control, which ships a CLI while this fork
+was UI + REST only. Deliberately thin: the backend already describes all 191 of
+its routes in OpenAPI, so this is a generic REST client with a few aliases rather
+than 191 hand-written subcommands.
+
+Standard library only — no dependency added for what urllib already does.
+
+  mc health
+  mc agents
+  mc tasks --board <id>
+  mc providers
+  mc ranking
+  mc activity --limit 20
+  mc get /api/v1/boards
+  mc post /api/v1/agents '{"name":"scout","role":"researcher"}'
+  mc receipt --board <id> <task-id>   # completion receipt: what finished, with evidence
+  mc routes                 # what the API actually offers
+  mc <anything> --json      # raw JSON instead of a table
+
+Configuration, in precedence order:
+  MC_URL    (default http://127.0.0.1:8000)
+  MC_TOKEN  operator bearer token; falls back to LOCAL_AUTH_TOKEN in ./.env
+"""
+
+from __future__ import annotations
+
+import http.client
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+DEFAULT_URL = "http://127.0.0.1:8000"
+TIMEOUT = 30
+
+# alias -> path. Only collection endpoints worth typing often.
+ALIASES = {
+    "health": "/health",
+    "agents": "/api/v1/agents",
+    "boards": "/api/v1/boards",
+    "providers": "/api/v1/providers",
+    "ranking": "/api/v1/ranking",
+    "activity": "/api/v1/activity",
+    "office": "/api/v1/office/agents",
+    "pev": "/api/v1/pev/tasks",
+    "calendar": "/api/v1/calendar/tasks",
+}
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"mc: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_token() -> str | None:
+    if tok := os.environ.get("MC_TOKEN"):
+        return tok
+    # Fall back to the deployment's own .env so the CLI works out of the box on
+    # the host. Parsed rather than sourced: never execute the env file.
+    for env_path in (Path.cwd() / ".env", Path(__file__).resolve().parent.parent / ".env"):
+        if not env_path.is_file():
+            continue
+        try:
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("LOCAL_AUTH_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip("'\"")
+        except OSError:
+            pass
+    return None
+
+
+def request(method: str, path: str, payload: str | None = None, query: dict | None = None):
+    base = os.environ.get("MC_URL", DEFAULT_URL).rstrip("/")
+    if not path.startswith("/"):
+        path = "/" + path
+    url = base + path
+    if query:
+        url += ("&" if "?" in url else "?") + urllib.parse.urlencode(query)
+
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        try:
+            json.loads(payload)
+        except json.JSONDecodeError as exc:
+            die(f"body is not valid JSON: {exc}")
+        data = payload.encode()
+        headers["Content-Type"] = "application/json"
+    if token := load_token():
+        headers["Authorization"] = f"Bearer {token}"
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            body = resp.read().decode()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        detail = body
+        try:
+            detail = json.loads(body).get("detail", body)
+        except json.JSONDecodeError:
+            pass
+        if exc.code in (401, 403):
+            detail = f"{detail} (set MC_TOKEN, or run where .env holds LOCAL_AUTH_TOKEN)"
+        die(f"HTTP {exc.code} {method} {path}: {detail}", 2)
+    except (OSError, http.client.HTTPException) as exc:
+        # A restarting backend drops the connection mid-response (RemoteDisconnected, reset,
+        # read timeout): unreachable too, not a traceback.
+        die(f"cannot reach {base}: {getattr(exc, 'reason', exc)} (set MC_URL)", 3)
+    if not body:
+        return None
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return body
+
+
+def rows_of(result):
+    """Best-effort: find the list of records in a response."""
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        for key in ("items", "results", "data", "rows", "agents", "tasks", "providers"):
+            if isinstance(result.get(key), list):
+                return result[key]
+    return None
+
+
+def render(result, as_json: bool) -> None:
+    if as_json or result is None:
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return
+    rows = rows_of(result)
+    if rows is None:
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return
+    if not rows:
+        print("(no rows)")
+        return
+    if not isinstance(rows[0], dict):
+        for r in rows:
+            print(r)
+        return
+    # Prefer identifying columns; fall back to whatever the record has.
+    preferred = ["id", "name", "title", "slug", "status", "state", "role", "kind", "created_at"]
+    cols = [c for c in preferred if c in rows[0]] or list(rows[0])[:5]
+
+    def cell(row, col):
+        v = row.get(col, "")
+        if isinstance(v, (dict, list)):
+            v = json.dumps(v, default=str)
+        v = str(v)
+        return v if len(v) <= 40 else v[:37] + "..."
+
+    widths = {c: max(len(c), *(len(cell(r, c)) for r in rows)) for c in cols}
+    print("  ".join(c.upper().ljust(widths[c]) for c in cols))
+    print("  ".join("-" * widths[c] for c in cols))
+    for r in rows:
+        print("  ".join(cell(r, c).ljust(widths[c]) for c in cols))
+    print(f"\n{len(rows)} row(s)")
+
+
+def find_task(board: str, task: str):
+    """Locate a task record. There is no GET on a single task, so read the board list."""
+    result = request("GET", f"/api/v1/boards/{board}/tasks")
+    for row in rows_of(result) or []:
+        if isinstance(row, dict) and row.get("id") == task:
+            return row
+    return None
+
+
+def cmd_receipt(board: str, task: str, as_json: bool) -> None:
+    """Assemble a completion receipt for one task.
+
+    Idea from builderz-labs/mission-control: "Logs show what ran. A completion
+    receipt shows what finished." Composed entirely from data already recorded —
+    no schema change — so it is a view, not a new source of truth. If it proves
+    useful, promote it to a backend endpoint.
+    """
+    record = find_task(board, task)
+    if record is None:
+        die(f"task {task} not found on board {board}", 2)
+
+    def soft(method, path, query=None):
+        """Sub-resources are best-effort: a missing one must not void the receipt."""
+        try:
+            return request(method, path, None, query)
+        except SystemExit:
+            return None
+
+    # These endpoints page (activity-log defaults to 200 and honours limit), so a
+    # bare call reports a page size, not a total. Ask for more than we expect and
+    # mark the count as truncated if we hit the ceiling rather than reporting a
+    # page size as if it were the truth.
+    PAGE = 200  # the strictest cap across these endpoints (/comments rejects more)
+    base = f"/api/v1/boards/{board}/tasks/{task}"
+    def fetch(path, query=None):
+        r = soft("GET", path, query)
+        return None if r is None else (rows_of(r) or [])
+
+    activity = fetch(f"{base}/activity-log", {"limit": PAGE})
+    comments = fetch(f"{base}/comments", {"limit": PAGE})
+    children = fetch(f"{base}/children")
+    pev = soft("GET", f"/api/v1/pev/tasks/{task}")
+
+    def count(rows):
+        if rows is None:
+            return "unavailable"   # never report a failed fetch as zero
+        return f"{len(rows)}+" if len(rows) >= PAGE else str(len(rows))
+
+    terminal = {"done", "completed", "closed", "resolved", "cancelled", "canceled"}
+    status = str(record.get("status", "")).lower()
+
+    receipt = {
+        "task": {k: record.get(k) for k in (
+            "id", "title", "status", "priority", "complexity", "assigned_agent_id",
+            "created_at", "in_progress_at", "due_at", "parent_task_id",
+            "max_tokens_budget", "budget_exhausted_at",
+        ) if record.get(k) is not None},
+        "finished": status in terminal,
+        "verification": {
+            "pev_state": (pev or {}).get("state") if isinstance(pev, dict) else None,
+            "pev_present": pev is not None,
+            "subtasks": count(children),
+            "comments": count(comments),
+            "activity_events": count(activity),
+            "truncated": any(r is not None and len(r) >= PAGE for r in (activity, comments)),
+        },
+        "budget": {
+            "exhausted": record.get("budget_exhausted_at") is not None,
+            "max_tokens": record.get("max_tokens_budget"),
+        },
+        "first_event": activity[-1].get("ts") if activity else None,
+        "last_event": activity[0].get("ts") if activity else None,
+        "evidence": [
+            {k: e.get(k) for k in ("ts", "event_type", "message", "agent_id") if k in e}
+            for e in (activity or [])[:10] if isinstance(e, dict)
+        ],
+    }
+
+    if as_json:
+        print(json.dumps(receipt, indent=2, ensure_ascii=False, default=str))
+        return
+
+    t = receipt["task"]
+    print(f"Receipt — {t.get('title', '(untitled)')}")
+    print(f"  task        {t.get('id')}")
+    print(f"  status      {t.get('status')}  ({'FINISHED' if receipt['finished'] else 'NOT FINISHED'})")
+    print(f"  assigned    {t.get('assigned_agent_id') or '(unassigned)'}")
+    print(f"  created     {t.get('created_at')}")
+    if receipt["first_event"]:
+        print(f"  activity    {receipt['first_event']} .. {receipt['last_event']}")
+    v = receipt["verification"]
+    print(f"  evidence    {v['activity_events']} events, {v['comments']} comments, "
+          f"{v['subtasks']} subtasks, pev={v['pev_state'] or 'none'}")
+    if receipt["budget"]["exhausted"]:
+        print("  BUDGET      exhausted")
+    if receipt["evidence"]:
+        print("\n  recent:")
+        for e in receipt["evidence"][:5]:
+            msg = str(e.get("message", ""))
+            print(f"    {e.get('ts', '')}  {e.get('event_type', '')}  "
+                  f"{msg if len(msg) <= 60 else msg[:57] + '...'}")
+
+
+def cmd_routes(as_json: bool) -> None:
+    spec = request("GET", "/openapi.json")
+    paths = spec.get("paths", {}) if isinstance(spec, dict) else {}
+    if as_json:
+        print(json.dumps(sorted(paths), indent=2))
+        return
+    for p in sorted(paths):
+        methods = ",".join(sorted(m.upper() for m in paths[p] if m in ("get", "post", "patch", "put", "delete")))
+        print(f"{methods:<24} {p}")
+    print(f"\n{len(paths)} path(s)")
+
+
+def main(argv: list[str]) -> int:
+    args = [a for a in argv if a != "--json"]
+    as_json = len(args) != len(argv)
+
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        print("aliases: " + ", ".join(sorted(ALIASES)) + ", receipt, routes, get, post")
+        return 0
+
+    cmd, rest = args[0], args[1:]
+
+    # --key value pairs become query parameters
+    query: dict[str, str] = {}
+    positional: list[str] = []
+    i = 0
+    while i < len(rest):
+        if rest[i].startswith("--") and i + 1 < len(rest):
+            query[rest[i][2:]] = rest[i + 1]
+            i += 2
+        else:
+            positional.append(rest[i])
+            i += 1
+
+    if cmd == "routes":
+        cmd_routes(as_json)
+        return 0
+    if cmd == "receipt":
+        board = query.pop("board", None) or (positional[0] if len(positional) > 1 else None)
+        task = positional[-1] if positional else None
+        if not board or not task:
+            die("usage: mc receipt --board <board-id> <task-id>")
+        cmd_receipt(board, task, as_json)
+        return 0
+    if cmd in ("get", "post", "patch", "delete", "put"):
+        if not positional:
+            die(f"{cmd} needs a path, e.g. mc {cmd} /api/v1/agents")
+        path = positional[0]
+        body = positional[1] if len(positional) > 1 else None
+        if body == "-":  # large bodies: argv is capped at 128 KiB per argument
+            body = sys.stdin.read()
+        render(request(cmd.upper(), path, body, query or None), as_json)
+        return 0
+    if cmd == "tasks":
+        board = query.pop("board", None)
+        path = f"/api/v1/boards/{board}/tasks" if board else "/api/v1/boards"
+        if not board:
+            print("mc: no --board given; listing boards instead\n", file=sys.stderr)
+        render(request("GET", path, None, query or None), as_json)
+        return 0
+    if cmd in ALIASES:
+        render(request("GET", ALIASES[cmd], None, query or None), as_json)
+        return 0
+
+    die(f"unknown command '{cmd}'. Try: mc help")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

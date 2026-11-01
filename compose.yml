@@ -1,0 +1,343 @@
+name: openclaw-mission-control
+
+services:
+  db:
+    restart: unless-stopped
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mission_control}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    restart: unless-stopped
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    restart: unless-stopped
+    build:
+      # Build from repo root so the backend image can include repo-level assets
+      # like `backend/templates/`.
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      # Override localhost defaults for container networking
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-mission_control}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      DB_AUTO_MIGRATE: ${DB_AUTO_MIGRATE:-true}
+      AUTH_MODE: ${AUTH_MODE}
+      LOCAL_AUTH_TOKEN: ${LOCAL_AUTH_TOKEN}
+      BASE_URL: ${BASE_URL:-http://localhost:8000}
+      RQ_REDIS_URL: redis://redis:6379/0
+      BUDGET_DAILY_TOKENS: ${BUDGET_DAILY_TOKENS:-50000000}
+      VLLM_HEALTH_URL: ${VLLM_HEALTH_URL:-}
+      # Host path of the mounted ~/.openclaw, so host-side workspace paths map into the container.
+      HOST_OPENCLAW_HOME: ${HOST_OPENCLAW_HOME:-${HOME}/.openclaw}
+      # LLM-call minimization (single free GPU): keyword-only routing, no
+      # freeform-completion LLM disambiguation, self-tests every 6h not 30min.
+      # Flip the *_LLM_ENABLED flags to "1" to restore LLM-assisted paths.
+      WATCHDOG_ROUTING_LLM_ENABLED: ${WATCHDOG_ROUTING_LLM_ENABLED:-0}
+      WATCHDOG_COMPLETION_LLM_ENABLED: ${WATCHDOG_COMPLETION_LLM_ENABLED:-0}
+      # Owner comment on a task → LLM-evaluate as a goal directive → rewrite the
+      # task description. ON (owner comments are intentional; 1 call each).
+      WATCHDOG_OWNER_DIRECTIVES_ENABLED: ${WATCHDOG_OWNER_DIRECTIVES_ENABLED:-1}
+      WATCHDOG_TEST_TRIGGER_DEBOUNCE_SECONDS: ${WATCHDOG_TEST_TRIGGER_DEBOUNCE_SECONDS:-21600}
+      # Provider benchmark: posts a REAL 256-tok generation per (online-provider
+      # × curated-model) each cycle — the only recurring LLM traffic MC itself
+      # makes, and it steals decode from live agents on the single Jetson GPU.
+      # OFF by default (one owner-pinned provider/model = nothing to rank). Set
+      # BENCHMARK_ENABLED=1 to restore when multiple providers are worth ranking.
+      BENCHMARK_ENABLED: ${BENCHMARK_ENABLED:-0}
+      # Traffic-dashboard ETL poll of OmniRoute call-logs (mgmt API, no inference)
+      # — 30s is ample (dashboard refreshes at 60s).
+      TRAFFIC_ETL_INTERVAL_SECONDS: ${TRAFFIC_ETL_INTERVAL_SECONDS:-30}
+      # Operational context cap advertised for omniroute-auto (combo context_length
+      # + openclaw.json contextWindow → gateway compaction budget). Held at 65536.
+      # 2026-08-25: TESTED raising to 131072 (KV fit fine — 203k-token pool, host RAM
+      # ~42/63GB, NO swap) but the Jetson's dense-27B PREFILL THROUGHPUT COLLAPSED at
+      # the larger max-model-len: a 10k-token cold prefill took 29s @65536 vs >90s
+      # (timeout, never finished) @131072 — i.e. big contexts would 504 on the
+      # gateway/omniroute 90s first-token wall. Not a memory limit, a prefill-speed
+      # limit. 65536 is the practical ceiling on this GPU. Both members (vllm +
+      # llamacpp) advertise this via min(). Raising needs a faster prefill path
+      # (better GPU, or drop MTP/tune chunked-prefill), not just more KV.
+      # 2026-10-03: this host's .env sets 262144. omniroute-auto is now cloud-first
+      # (Codex 272k, Claude Code P 200k, Neuralwatt 131k) with the Jetson only as
+      # a weight-0 fallback, so the Jetson prefill ceiling above no longer bounds
+      # the agents' context; the gateway runs with contextWindow=229376.
+      VLLM_OPERATIONAL_CONTEXT: ${VLLM_OPERATIONAL_CONTEXT:-65536}
+      OPENCLAW_HOME: /home/host_openclaw
+      # Gateway device identity MUST live on the mounted host volume. The
+      # default path is $HOME/.openclaw/identity inside the container, which
+      # is ephemeral: every redeploy minted a new Ed25519 identity, so the
+      # gateway saw an unknown device and refused every agent notification
+      # with "pairing required: device is not approved yet" until someone
+      # re-approved by hand.
+      OPENCLAW_GATEWAY_DEVICE_IDENTITY_PATH: /home/host_openclaw/identity/mc-backend-device.json
+      OBSIDIAN_VAULT_PATH: /home/host_openclaw/wiki-vault
+      REVIEW_FILE: /traffic-data/OWNER_REVIEW.json
+      # Must match the uid that owns the gateway home. The gateway owns
+      # ~/.openclaw as root and re-hardens it to 0700/0755 on every start, so
+      # uid 1000 lost access to the config, the device identity and the agent
+      # provisioning files -- every agent provision failed with
+      # "Permission denied: /home/host_openclaw/identity".
+      HOST_OPENCLAW_UID: "${HOST_OPENCLAW_UID:-0}"
+      PRIVATE_BOARD_IDS: ${PRIVATE_BOARD_IDS:-}
+      # T71 (2026-05-15): OmniRoute one-way sync. Leave OMNIROUTE_MGMT_TOKEN
+      # empty (default) to disable sync. To enable: log into OmniRoute
+      # dashboard at http://localhost:20128, create an API key with the
+      # `manage` scope, then set OMNIROUTE_MGMT_TOKEN in the shell env
+      # before `docker compose up`. The URL points at the internal compose
+      # hostname `omniroute` which is reachable when `--profile omniroute`
+      # is enabled.
+      OMNIROUTE_URL: ${OMNIROUTE_URL:-http://omniroute:20128}
+      OMNIROUTE_MGMT_TOKEN: ${OMNIROUTE_MGMT_TOKEN:-}
+      # OmniRoute JWT signing secret — lets the ETL self-mint a fresh short-lived
+      # mgmt token each poll so the 30-day OMNIROUTE_MGMT_TOKEN can never expire
+      # and silently stall the /traffic feed.
+      OMNIROUTE_JWT_SECRET: ${OMNIROUTE_JWT_SECRET:-}
+      # T103 (2026-05-17): OmniRoute runtime endpoint + chat-scope API key.
+      # MC uses this to list available models for routing decisions.
+      OMNIROUTE_RUNTIME_URL: ${OMNIROUTE_RUNTIME_URL:-http://omniroute:20129/v1}
+      OMNIROUTE_RUNTIME_KEY: ${OMNIROUTE_RUNTIME_KEY:-}
+      # T88 (2026-05-16): openclaw-gateway bearer for the Chat tab's
+      # "openclaw-gateway" backend option (equivalent of
+      # `openclaw infer model run --gateway`). When unset, the option
+      # rejects requests with a clear 400 error. The host:port points
+      # at the gateway's OpenAI-compat /v1/chat/completions endpoint.
+      OPENCLAW_GATEWAY_HOST: ${OPENCLAW_GATEWAY_HOST:-172.17.0.1:18789}
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${HOME}/.mitmproxy:/mitmproxy:ro
+      - traffic_data:/traffic-data
+      - ${HOME}/.openclaw:/home/host_openclaw
+      # T105 (2026-05-25): snapshot root. Backend reads/writes here.
+      - ${HOME}/openclaw-project/snapshots:/snapshots
+      # T105: read-only mounts for full-system snapshot. Backend reads
+      # the OmniRoute data volume + the compose project dir so all
+      # components land in one snapshot. NEVER writes here (`:ro`).
+      - omniroute_data:/snap-sources/omniroute_data:ro
+      - .:/snap-sources/compose-project:ro
+      # Installed skills page (owner 2026-10-28): the skill folders only, never ~/.claude or
+      # ~/.pi/agent themselves (credentials). Writable: the page edits skill Markdown (admin, audited).
+      - ${HOME}/.claude/skills:/home/host_skills/claude
+      - ${HOME}/.claude/plugins:/home/host_skills/claude-plugins
+      - ${HOME}/.pi/agent/git:/home/host_skills/pi-packages
+      - ${HOME}/.pi/agent/skills:/home/host_skills/pi
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+
+  frontend:
+    restart: unless-stopped
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-auto}
+        NEXT_PUBLIC_BACKEND_PORT: ${BACKEND_PORT:-8000}
+        NEXT_PUBLIC_AUTH_MODE: ${AUTH_MODE}
+    # Optional, user-managed env file.
+    # IMPORTANT: do NOT load `.env.example` here because it contains non-empty
+    # placeholder Clerk keys, which can accidentally flip Clerk "on".
+    env_file:
+      - path: ./frontend/.env
+        required: false
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-auto}
+      NEXT_PUBLIC_BACKEND_PORT: ${BACKEND_PORT:-8000}
+      NEXT_PUBLIC_AUTH_MODE: ${AUTH_MODE}
+      OMNIROUTE_DASHBOARD_URL: ${OMNIROUTE_DASHBOARD_URL:-}
+      OMNIROUTE_PORT: ${OMNIROUTE_PORT:-20128}
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    develop:
+      watch:
+        # Rebuild frontend image when UI source or build config changes.
+        - action: rebuild
+          path: ./frontend/src
+        - action: rebuild
+          path: ./frontend/package.json
+        - action: rebuild
+          path: ./frontend/package-lock.json
+        - action: rebuild
+          path: ./frontend/next.config.ts
+        - action: rebuild
+          path: ./frontend/postcss.config.js
+        - action: rebuild
+          path: ./frontend/tailwind.config.cjs
+        - action: rebuild
+          path: ./frontend/tsconfig.json
+
+  webhook-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "scripts/rq-docker", "worker"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-mission_control}
+      AUTH_MODE: ${AUTH_MODE}
+      LOCAL_AUTH_TOKEN: ${LOCAL_AUTH_TOKEN}
+      BASE_URL: ${BASE_URL:-http://localhost:8000}
+      RQ_REDIS_URL: redis://redis:6379/0
+      RQ_QUEUE_NAME: ${RQ_QUEUE_NAME:-default}
+      RQ_DISPATCH_THROTTLE_SECONDS: ${RQ_DISPATCH_THROTTLE_SECONDS:-2.0}
+      RQ_DISPATCH_MAX_RETRIES: ${RQ_DISPATCH_MAX_RETRIES:-3}
+      # Agent lifecycle-reconcile jobs run here and call the gateway, so this
+      # needs the backend's identity and uid. Without them the worker ran as
+      # uid 1000 (hence fix-perms.sh making openclaw.json world-readable) and
+      # would present an unpaired, ephemeral device to the gateway.
+      OPENCLAW_HOME: /home/host_openclaw
+      OPENCLAW_GATEWAY_DEVICE_IDENTITY_PATH: /home/host_openclaw/identity/mc-backend-device.json
+      HOST_OPENCLAW_UID: "${HOST_OPENCLAW_UID:-0}"
+      PRIVATE_BOARD_IDS: ${PRIVATE_BOARD_IDS:-}
+      OPENCLAW_GATEWAY_HOST: ${OPENCLAW_GATEWAY_HOST:-172.17.0.1:18789}
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+    volumes:
+      - ${HOME}/.openclaw:/home/host_openclaw
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ──────────────────────────────────────────────────────────────────
+  # OmniRoute — optional unified AI proxy / gateway (T59, 2026-05-15).
+  # Enable via:  docker compose --profile omniroute up -d
+  # Dashboard:   http://localhost:20128  (login with INITIAL_PASSWORD
+  #              from .env.omniroute — change immediately after first
+  #              login from Dashboard → Settings → Security).
+  # API:         http://localhost:20129/v1  (OpenAI-compatible)
+  # To route mission-control vLLM traffic through OmniRoute, edit
+  # ~/.openclaw/openclaw.json:
+  #   "models.providers.vllm.baseUrl": "http://localhost:20129/v1"
+  # OmniRoute then handles fallback chains, strategy routing, and
+  # provider key management — the /providers tab still toggles
+  # capacity, the routing happens externally.
+  # ──────────────────────────────────────────────────────────────────
+  omniroute:
+    # Built locally from the pinned upstream release plus the OMC patch (dispatchEvent() webhooks
+    # on provider/node mutations, prompt-aware routing, the optional private lane):
+    #   omniroute/build.sh omniroute:omc-local --target runner-base
+    # runner-base is enough (~4.5GB); a bare build targets runner-cli (~7.3GB, playwright + CLIs).
+    # OMNIROUTE_IMAGE pins another tag, e.g. diegosouzapw/omniroute:latest for plain upstream.
+    image: ${OMNIROUTE_IMAGE:-omniroute:omc-local}
+    container_name: omniroute
+    restart: unless-stopped
+    env_file:
+      - path: ./.env.omniroute
+        required: false
+    environment:
+      DATA_DIR: /app/data
+      REDIS_URL: redis://redis:6379/3
+      # T103 v11 (2026-05-18): payload-rules path. Injects vllm
+      # `chat_template_kwargs.enable_thinking=false` so reasoning trace
+      # doesn't burn 10min before answering.
+      OMNIROUTE_PAYLOAD_RULES_PATH: /app/data/payloadRules.json
+      # T104 (2026-05-25): bump stream-readiness timeout 30s → 90s.
+      # 24h triage showed 23× 504 on vllm/Qwen3.6 prefill, all
+      # `prompt_tokens=0` and ~30s latency — OR's `STREAM_READINESS_TIMEOUT_MS`
+      # default cancels valid streams before vllm finishes processing
+      # 100K+ token prompts. 2× 429 same root cause (semaphore release
+      # delayed by stuck streams). See `79721.js getTimeoutConfig`.
+      STREAM_READINESS_TIMEOUT_MS: "900000"
+      # Jetson can take longer than 30s to emit headers for a queued large prefill.
+      # Cold 100K+ prefill may take 7–10 minutes; don't cancel and replay it.
+      OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS: "900000"
+      # T111 (2026-09-16): 90s → 300s. 7d flows: 624× 504 "Stream produced
+      # no non-ping SSE event within 90-120s" — with the broken llamacpp
+      # combo member gated out, vllm takes ALL traffic and single-GPU big
+      # prefills queue past 120s before the first token. 300s matches the
+      # RATE_LIMIT_MAX_WAIT_MS budget (T105): slow-but-real streams finish
+      # instead of being cut + retried (self-amplifying).
+      # 2026-08-16: bump stream-IDLE timeout 12s → 60s. The Qwen3.8-27B-FP8
+      # swap made mid-stream gaps (prefill/reasoning between non-ping SSE
+      # events) exceed OR's 12s `STREAM_IDLE_TIMEOUT_MS` default → 504 "Stream
+      # produced no non-ping SSE event within 12000ms", cascading to the
+      # combo's 524 "all targets failed" (the traffic-tab flapping).
+      STREAM_IDLE_TIMEOUT_MS: "180000"
+      # 2026-08-17: single Jetson GPU + Qwen3.8 large-context prefills take
+      # 60-120s+. When a stream is aborted (idle/client timeout) OR's
+      # per-connection semaphore LEAKS the slot (counter never decrements) →
+      # later requests 429 "Semaphore timeout after 30000ms" even with vllm
+      # idle → retry storm. Mitigations: (a) 180s idle so slow prefills finish
+      # instead of aborting; (b) wait up to RATE_LIMIT_MAX_WAIT for a slot
+      # instead of a 30s semaphore 429.
+      # Busy connections should fail over, not hold the combo for five minutes.
+      SEMAPHORE_TIMEOUT: "1000"
+      # T105 (2026-06-22): raise rate-limiter job timeout 120s → 300s.
+      # Triage of LLM-traffic tab: 71% of requests (472/661) returned 502
+      # "This job timed out after 120000 ms" with in=0/out=0. Duration
+      # histogram showed 448 of those errors sat in the 60-120s band and
+      # were killed at the 120s ceiling — while successful 200s ALSO
+      # complete in that same 60-120s band (24 of them). i.e. the Jetson
+      # serves them, OR just stopped waiting. The 120s cut → client retry
+      # → more load → more 120s cuts (self-amplifying). 300s lets the slow
+      # ones complete (→ 200, no retry) and breaks the retry storm.
+      # Knob: RATE_LIMIT_MAX_WAIT_MS (env path uncapped; UI clamps at 120s).
+      RATE_LIMIT_MAX_WAIT_MS: "900000"
+      # One slow provider must not block every other provider's agent loop.
+      # Keep TWO total heavy leases (previously 1 primary + 1 healthy-only);
+      # byte-heavy and structurally-heavy requests now share the same ceiling.
+      # Provider/account limits and the 4 MiB queued-body bound stay unchanged.
+      NODE_OPTIONS: "--max-old-space-size=2048"
+      OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT: "2"
+      OMNIROUTE_CHAT_ADMISSION_HEALTHY_HEADROOM: "0"
+      OMNIROUTE_CHAT_ADMISSION_QUEUE_MS: "60000"
+    ports:
+      - "0.0.0.0:${OMNIROUTE_PORT:-20128}:20128"
+      - "0.0.0.0:${OMNIROUTE_PORT2:-20129}:20129"
+    volumes:
+      - omniroute_data:/app/data
+      - ${OMNIROUTE_PAYLOAD_RULES:-./data/etc/payloadRules.json}:/app/data/payloadRules.json:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    profiles:
+      - omniroute
+
+volumes:
+  postgres_data:
+  traffic_data:
+  omniroute_data:

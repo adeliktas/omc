@@ -1,0 +1,8 @@
+{
+  "name": "pi-extensions",
+  "private": true,
+  "dependencies": {
+    "@spences10/pi-mcp": "^0.0.60",
+    "pi-goal-x": "^0.32.3"
+  }
+}

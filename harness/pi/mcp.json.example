@@ -1,0 +1,12 @@
+{
+  "settings": { "toolPrefix": "server", "requestTimeoutMs": 120000, "maxRetries": 1 },
+  "mcpServers": {
+    "camoufox": {
+      "command": "@CAMOUFOX_MCP_COMMAND@",
+      "args": [],
+      "env": { "CAMOUFOX_HEADLESS": "1" },
+      "transport": "stdio",
+      "lifecycle": "lazy"
+    }
+  }
+}
