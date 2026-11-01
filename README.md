@@ -29,7 +29,8 @@ For how the pieces fit together, see [architecture](docs/architecture/README.md#
 
 ## Install
 
-The supported target is Gentoo Linux with OpenRC and rootless Docker. Each deployment is an
+The installer targets Linux with rootless Docker and OpenRC (Gentoo, tested) or systemd (Debian 13+,
+supported but not yet tested on a real host). Each deployment is an
 isolated, named instance:
 - its own unprivileged user and home;
 - its own Docker daemon, ports and `data/` directory;

@@ -124,16 +124,16 @@ check_7() {
   if ! python3 "$here/components.py" --fleet-ready; then
     sed -i 's/^RUNNER_APPLY=.*/RUNNER_APPLY=0/' "$data/etc/fleet.env"
     for s in mc-team-pool mc-review-agent; do
-      if rc-service -U "$s" status >/dev/null 2>&1; then rc-service -U "$s" stop || return 1; fi
-      rc-update -U del "$s" default >/dev/null 2>&1 || true
+      if omc_svc status "$s" >/dev/null 2>&1; then omc_svc stop "$s" || return 1; fi
+      omc_svc disable "$s" >/dev/null 2>&1 || true
     done
     echo "  No configured optional coding harness: fleet disarmed; OpenClaw/PEV remains available."
     return 0
   fi
   sed -i 's/^RUNNER_APPLY=.*/RUNNER_APPLY=1/' "$data/etc/fleet.env"
   for s in mc-team-pool mc-review-agent; do
-    rc-update -U add "$s" default >/dev/null 2>&1
-    rc-service -U "$s" status >/dev/null 2>&1 || rc-service -U "$s" start >/dev/null 2>&1
+    omc_svc enable "$s" >/dev/null 2>&1
+    omc_svc status "$s" >/dev/null 2>&1 || omc_svc start "$s" >/dev/null 2>&1
   done
   sleep 3
   pgrep -u "$(id -u)" -f "scripts/mc-team-pool.py" >/dev/null || { echo "  the pool is not running (see $data/log/mc-claude-runner.log)"; return 1; }

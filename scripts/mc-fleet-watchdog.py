@@ -208,9 +208,22 @@ def last_done(board: str):
         return None
 
 
+def pool_started():
+    """Whether the team pool runs: the host's system service, or an instance user's own one."""
+    if not os.environ.get("OMC_DATA"):  # not an instance (its crontab sets OMC_DATA)
+        return "started" in subprocess.run(["rc-service", "mc-team-pool", "status"], capture_output=True, text=True).stdout
+    if os.environ.get("RUNNER_APPLY") != "1":
+        return True  # a disarmed instance stops its pool on purpose
+    env = {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"}  # cron sets none
+    cmd = (["systemctl", "--user", "is-active", "--quiet", "mc-team-pool"] if Path("/run/systemd/system").is_dir()
+           else ["rc-service", "-U", "mc-team-pool", "status"])
+    return subprocess.run(cmd, capture_output=True, env=env).returncode == 0
+
+
 def findings():
     out = []
-    for name, url in (("backend", "http://127.0.0.1:8000/health"), ("frontend", "http://127.0.0.1:3000/")):
+    backend, frontend = os.environ.get("BACKEND_PORT", "8000"), os.environ.get("FRONTEND_PORT", "3000")
+    for name, url in (("backend", f"http://127.0.0.1:{backend}/health"), ("frontend", f"http://127.0.0.1:{frontend}/")):
         try:
             urllib.request.urlopen(url, timeout=10)
         except Exception as exc:  # noqa: BLE001
@@ -225,7 +238,7 @@ def findings():
     except BaseException as exc:  # noqa: BLE001 - the CLI exits on HTTP errors
         out.append(f"API/database unavailable: {type(exc).__name__}: {str(exc)[:150]}")
         return sorted(set(out))
-    if "started" not in subprocess.run(["rc-service", "mc-team-pool", "status"], capture_output=True, text=True).stdout:
+    if not pool_started():
         out.append("mc-team-pool service is not started")
     now = datetime.now(UTC)
     # Errors logged before the last Opus run ended predate its fix; recounting them paid

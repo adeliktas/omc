@@ -34,3 +34,77 @@ omc_pick_ports() {
   done
   echo "${out[*]}"
 }
+
+# The host's service manager: systemd, openrc or none (OMC_INIT overrides, for tests).
+omc_init() {
+  if [ -n "${OMC_INIT:-}" ]; then echo "$OMC_INIT"
+  elif [ -d /run/systemd/system ]; then echo systemd
+  elif [ -d /run/openrc ]; then echo openrc
+  else echo none; fi
+}
+
+# One action on one of the calling user's services: start|stop|status|enable|disable <name>, or
+# daemon-reload after its service files changed.
+omc_svc() {
+  local act=$1 s=${2:-}
+  case $(omc_init) in
+    systemd)
+      case $act in
+        status) systemctl --user is-active --quiet "$s" ;;
+        daemon-reload) systemctl --user daemon-reload ;;
+        *) systemctl --user "$act" "$s" ;;
+      esac ;;
+    openrc)
+      case $act in
+        enable) rc-update -U add "$s" default ;;
+        disable) rc-update -U del "$s" default ;;
+        daemon-reload) : ;;
+        *) rc-service -U "$s" "$act" ;;
+      esac ;;
+    *) echo "OMC needs OpenRC or systemd as the service manager" >&2; return 1 ;;
+  esac
+}
+
+# Render the user services <name>... from <templates>/{openrc,systemd}/ into the calling user's
+# service directory, with @OMC_HOME@ and @OMC_DATA@ filled in.
+omc_render_services() {
+  local tpl=$1 home=$2 data=$3 dir ext="" s
+  shift 3
+  if [ "$(omc_init)" = systemd ]; then dir=$HOME/.config/systemd/user ext=.service tpl=$tpl/systemd
+  else dir=$HOME/.config/rc/init.d tpl=$tpl/openrc; fi
+  mkdir -p "$dir"
+  for s in "$@"; do
+    sed "s|@OMC_HOME@|$home|g; s|@OMC_DATA@|$data|g" "$tpl/$s$ext" > "$dir/$s$ext"
+    [ -n "$ext" ] || chmod 755 "$dir/$s"
+  done
+}
+
+# The host's package manager: emerge, apt or none.
+omc_pkg_manager() {
+  if command -v emerge >/dev/null; then echo emerge
+  elif command -v apt-get >/dev/null; then echo apt
+  else echo none; fi
+}
+
+# Packages (named for <pm>: emerge or apt) that provide what an instance needs and this host lacks.
+# Docker comes from Docker's own apt repository on Debian/Ubuntu (their docker.io is too old).
+omc_missing_packages() {
+  local pm=$1 out=()
+  _omc_need() { # <Gentoo atoms> <Debian packages> <test command...>
+    "${@:3}" >/dev/null 2>&1 && return
+    # shellcheck disable=SC2206  # each argument is a space-separated package list
+    if [ "$pm" = apt ]; then out+=($2); else out+=($1); fi
+  }
+  _omc_need "app-containers/docker app-containers/docker-cli" "docker-ce docker-ce-cli" command -v docker
+  _omc_need app-containers/docker-compose docker-compose-plugin docker compose version
+  _omc_need sys-apps/shadow uidmap command -v newuidmap
+  _omc_need sys-apps/bubblewrap bubblewrap command -v bwrap
+  _omc_need app-containers/slirp4netns slirp4netns command -v slirp4netns
+  _omc_need dev-vcs/git git command -v git
+  _omc_need net-misc/curl curl command -v curl
+  _omc_need sys-process/cronie cron command -v crontab
+  _omc_need dev-lang/python python3 python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))'
+  # Rootless Docker under systemd talks to the user's manager over a D-Bus user session.
+  [ "$(omc_init)" != systemd ] || _omc_need sys-apps/dbus dbus-user-session test -e /usr/lib/systemd/user/dbus.socket
+  echo "${out[*]}"
+}

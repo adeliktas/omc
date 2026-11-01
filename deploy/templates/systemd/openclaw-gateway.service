@@ -1,0 +1,19 @@
+# Core gateway of this instance; uses only the instance user's existing OpenClaw config.
+# A systemd user service; rendered by deploy/install.sh.
+[Unit]
+Description=OMC OpenClaw gateway
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=@OMC_HOME@
+Environment=PATH=%h/.local/bin:%h/.local/node/bin:/usr/local/bin:/usr/bin:/bin
+# Runs only once OpenClaw is installed and configured for this user.
+ExecCondition=/bin/sh -c 'test -x %h/.local/bin/openclaw && test -f %h/.openclaw/openclaw.json'
+ExecStart=%h/.local/bin/openclaw gateway
+Restart=always
+RestartSec=10
+StandardOutput=append:@OMC_DATA@/log/openclaw-gateway.log
+StandardError=append:@OMC_DATA@/log/openclaw-gateway.log
+
+[Install]
+WantedBy=default.target

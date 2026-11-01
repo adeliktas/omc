@@ -11,21 +11,31 @@ Instances never share state. Each one can be removed completely with `deploy/pur
 
 ## Requirements
 
-Requirements are the same Gentoo stack OMC is developed on:
+- **System:** Linux with OpenRC 0.63 or newer, or systemd. The scripts detect which one runs
+  and set up the instance's services for it.
+  - **Gentoo with OpenRC** is what OMC is developed and tested on.
+  - **Debian 13 (trixie) or newer with systemd** is supported by the scripts but **not yet tested
+    on a real host**. Debian 12 ships Python 3.11, which is too old. Ubuntu works the same way;
+    on Ubuntu 24.04+ AppArmor may block rootless Docker's user namespaces (see Docker's rootless
+    docs).
+- **Packages** (Gentoo atom / Debian package):
 
-- **System:** Gentoo Linux with OpenRC 0.63 or newer.
-- **Packages:**
-  - `app-containers/docker`, version 29 or newer;
-  - `sys-apps/shadow`, for `newuidmap`;
-  - `sys-apps/bubblewrap`;
-  - `app-containers/slirp4netns`;
-  - `dev-vcs/git`;
-  - `net-misc/curl`;
-  - Python 3.12 or newer.
-- **Hardware:** about 8 GB of free RAM for the image builds, and 20 GB of disk per instance.
+  | Needed for | Gentoo | Debian |
+  |---|---|---|
+  | Docker 29+ and Compose | `app-containers/docker`, `app-containers/docker-cli`, `app-containers/docker-compose` | `docker-ce`, `docker-ce-cli`, `docker-compose-plugin` from Docker's apt repository |
+  | `newuidmap` | `sys-apps/shadow` | `uidmap` |
+  | sandboxing | `sys-apps/bubblewrap` | `bubblewrap` |
+  | rootless networking | `app-containers/slirp4netns` | `slirp4netns` |
+  | the fleet's cron jobs | `sys-process/cronie` | `cron` |
+  | systemd hosts only | `sys-apps/dbus` (user session) | `dbus-user-session` |
+  | tools | `dev-vcs/git`, `net-misc/curl`, `dev-lang/python` (3.12+) | `git`, `curl`, `python3` (3.12+) |
+
+- **Hardware:** more than 12 GB of free RAM while the OmniRoute image builds (its `next build`
+  reached 11.9 GB), and 20 GB of disk per instance.
 
 `deploy/host-prep.sh` lists anything missing. With `--install-packages` it installs them through
-`emerge --noreplace`.
+`emerge --noreplace` on Gentoo, or `apt-get` on Debian/Ubuntu (it adds Docker's apt repository
+first, because the distribution's `docker.io` is older than Docker 29).
 
 ## 1. Prepare the host (root, once per instance)
 
@@ -40,7 +50,8 @@ Host prep does the following, and nothing else on the host:
 2. It assigns a subordinate uid and gid range.
 3. It installs Docker's static rootless extras (`rootlesskit`) for the host's Docker version under
    `/opt/omc/rootless-extras/`.
-4. It starts the user's own rootless Docker daemon as an OpenRC user service (`user.omc-demo`).
+4. It starts the user's own rootless Docker daemon as a user service: on OpenRC through
+   `user.omc-demo`, on systemd through the user's own systemd manager (`loginctl enable-linger`).
 5. It enables that service for future boots. No reboot is needed.
 
 ## 2. Install (as the instance user)

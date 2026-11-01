@@ -684,3 +684,44 @@ def test_a_task_decision_never_parks_an_idle_board(monkeypatch, tmp_path):
     reply["result"] = "re-queued two issues"
     tick()  # second try within MAX_TRIES: the decision does not park the board finding
     assert len(prompts) == 1
+
+
+def _watchdog():
+    spec = importlib.util.spec_from_file_location("fleet_watchdog", SCRIPT)
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    return w
+
+
+def test_an_instance_checks_its_own_ports(monkeypatch):
+    w = _watchdog()
+    monkeypatch.setenv("BACKEND_PORT", "13001")
+    monkeypatch.setenv("FRONTEND_PORT", "13000")
+    urls = []
+    monkeypatch.setattr(w.urllib.request, "urlopen", lambda url, **k: urls.append(url))
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(w.runpy, "run_path", lambda path: (_ for _ in ()).throw(OSError("down")))
+    w.findings()
+    assert urls == ["http://127.0.0.1:13001/health", "http://127.0.0.1:13000/"]
+
+
+def test_the_pool_check_asks_the_right_service_manager(monkeypatch):
+    w = _watchdog()
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw.get("env", {}).get("XDG_RUNTIME_DIR")))
+        return type("R", (), {"stdout": " * status: started", "returncode": 0})()
+
+    monkeypatch.setattr(w.subprocess, "run", run)
+    monkeypatch.delenv("OMC_DATA", raising=False)
+    assert w.pool_started() and calls[-1][0] == ["rc-service", "mc-team-pool", "status"]  # production
+    monkeypatch.setenv("OMC_DATA", "/home/omc-x/omc/data")
+    monkeypatch.setenv("RUNNER_APPLY", "0")
+    calls.clear()
+    assert w.pool_started() and calls == []  # a disarmed instance stops its pool on purpose
+    monkeypatch.setenv("RUNNER_APPLY", "1")
+    assert w.pool_started()
+    cmd, runtime = calls[-1]
+    assert cmd in (["rc-service", "-U", "mc-team-pool", "status"], ["systemctl", "--user", "is-active", "--quiet", "mc-team-pool"])
+    assert runtime == f"/run/user/{os.getuid()}"

@@ -1,0 +1,18 @@
+# OMC team-cycle pool supervisor of one OMC instance: a systemd user service, run as the instance user.
+# Rendered by deploy/install.sh; started by deploy/setup.sh (step 7).
+[Unit]
+Description=OMC team-cycle pool supervisor
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=@OMC_HOME@
+# The fleet runs only while armed. systemd expands $VAR itself, so the shell's variables are $$VAR.
+ExecCondition=/bin/sh -c '. "@OMC_DATA@/.env"; . "@OMC_DATA@/etc/fleet.env"; test "$${RUNNER_APPLY:-}" = 1'
+ExecStart=/bin/sh -c 'set -a; . "@OMC_DATA@/.env"; . "@OMC_DATA@/etc/fleet.env"; set +a; exec /usr/bin/python3 "@OMC_HOME@/scripts/mc-team-pool.py"'
+Restart=always
+RestartSec=10
+StandardOutput=append:@OMC_DATA@/log/mc-claude-runner.log
+StandardError=append:@OMC_DATA@/log/mc-claude-runner.log
+
+[Install]
+WantedBy=default.target

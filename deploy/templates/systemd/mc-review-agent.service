@@ -1,0 +1,18 @@
+# OMC autonomous acceptance reviewer of one OMC instance: a systemd user service, run as the instance user.
+# Rendered by deploy/install.sh; started by deploy/setup.sh (step 7).
+[Unit]
+Description=OMC autonomous acceptance reviewer
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=@OMC_HOME@
+# The fleet runs only while armed. systemd expands $VAR itself, so the shell's variables are $$VAR.
+ExecCondition=/bin/sh -c '. "@OMC_DATA@/.env"; . "@OMC_DATA@/etc/fleet.env"; test "$${RUNNER_APPLY:-}" = 1'
+ExecStart=/bin/sh -c 'set -a; . "@OMC_DATA@/.env"; . "@OMC_DATA@/etc/fleet.env"; set +a; exec /usr/bin/python3 "@OMC_HOME@/scripts/mc-review-agent.py"'
+Restart=always
+RestartSec=5
+StandardOutput=append:@OMC_DATA@/log/mc-review-agent.log
+StandardError=append:@OMC_DATA@/log/mc-review-agent.log
+
+[Install]
+WantedBy=default.target

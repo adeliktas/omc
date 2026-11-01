@@ -23,9 +23,14 @@ ports=$(grep -hE '^[A-Z0-9_]*PORT[0-9]*=[0-9]+$' "$home"/omc/data/.env 2>/dev/nu
 
 run su - "$user" -c 'cd ~/omc 2>/dev/null && docker compose down -v --rmi all --remove-orphans' || true
 run su - "$user" -c 'crontab -r' || true
-run rc-service "user.$user" stop || true
-run rc-update del "user.$user" default || true
-run rm -f "/etc/init.d/user.$user" "/etc/conf.d/user.$user"
+if [ "$(omc_init)" = systemd ]; then
+  run loginctl disable-linger "$user" || true
+  run systemctl stop "user@$uid.service" || true
+else
+  run rc-service "user.$user" stop || true
+  run rc-update del "user.$user" default || true
+  run rm -f "/etc/init.d/user.$user" "/etc/conf.d/user.$user"
+fi
 run pkill -KILL -U "$uid" || true
 run sed -i "/^$user:/d" /etc/subuid /etc/subgid
 [ -f "${OMC_REGISTRY:-/etc/omc/instances}" ] && run sed -i "/^$name /d" "${OMC_REGISTRY:-/etc/omc/instances}"
@@ -39,6 +44,7 @@ for p in $ports; do [ -n "$(ss -Htln "sport = :$p")" ] && left+=("port $p"); don
 getent passwd "$user" >/dev/null && left+=("passwd entry")
 grep -qs "^$user:" /etc/subuid /etc/subgid && left+=("subuid/subgid line")
 [ -e "/etc/init.d/user.$user" ] && left+=("/etc/init.d/user.$user")
+[ -e "/var/lib/systemd/linger/$user" ] && left+=("systemd linger")
 [ -e "/var/spool/cron/crontabs/$user" ] && left+=("crontab")
 [ -e "$home" ] && left+=("$home")
 [ ${#left[@]} -eq 0 ] || die "leftovers: ${left[*]}"

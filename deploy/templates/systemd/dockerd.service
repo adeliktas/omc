@@ -1,0 +1,27 @@
+# Rootless Docker daemon of one OMC instance (a systemd user service; runs as the instance user).
+# Follows the unit Docker's dockerd-rootless-setuptool.sh writes. Rendered by deploy/host-prep.sh.
+[Unit]
+Description=Rootless Docker daemon for this OMC instance
+StartLimitBurst=3
+StartLimitIntervalSec=60s
+
+[Service]
+Environment=PATH=@EXTRAS@:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+ExecStart=@EXTRAS@/dockerd-rootless.sh
+ExecReload=/bin/kill -s HUP $MAINPID
+TimeoutSec=0
+RestartSec=2
+Restart=always
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+Delegate=yes
+Type=notify
+NotifyAccess=all
+KillMode=mixed
+StandardOutput=append:%h/.local/state/dockerd.log
+StandardError=append:%h/.local/state/dockerd.log
+
+[Install]
+WantedBy=default.target

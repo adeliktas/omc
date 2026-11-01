@@ -46,11 +46,12 @@ ln -sfn data/.env.omniroute "$home/.env.omniroute"
 [ "$(id -u)" != 0 ] || die "do not run as root"
 [ -f "$HOME/.omc-instance" ] || die "not an OMC instance user (run deploy/host-prep.sh <name> as root first)"
 export DOCKER_HOST=${DOCKER_HOST:-unix:///run/user/$(id -u)/docker.sock}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}  # user services (OpenRC -U, systemctl --user)
 docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless || die "rootless Docker is not reachable at $DOCKER_HOST"
 set -a; . "$data/.env"; set +a
 cd "$home"
 
-# OmniRoute: pinned upstream + OMC patch, webpack and one worker to stay inside small hosts' RAM.
+# OmniRoute: pinned upstream + OMC patch, webpack and one worker; still needs >12 GB of free RAM.
 if [ -n "${OMC_REBUILD_OMNIROUTE:-}" ] || ! docker image inspect "$OMNIROUTE_IMAGE" >/dev/null 2>&1; then
   "$home/omniroute/build.sh" "$OMNIROUTE_IMAGE" --target runner-base \
     --build-arg OMNIROUTE_USE_TURBOPACK=0 --build-arg OMNIROUTE_BUILD_WORKERS=1
@@ -62,12 +63,8 @@ docker image prune -f >/dev/null
 docker builder prune -af >/dev/null
 
 # Fleet services and crontab are rendered here and started by deploy/setup.sh (step 7).
-svc=$HOME/.config/rc/init.d
-mkdir -p "$svc"
-for s in mc-team-pool mc-review-agent openclaw-gateway; do
-  sed "s|@OMC_HOME@|$home|g; s|@OMC_DATA@|$data|g" "$here/templates/openrc/$s" > "$svc/$s"
-  chmod 755 "$svc/$s"
-done
+omc_render_services "$here/templates" "$home" "$data" mc-team-pool mc-review-agent openclaw-gateway
+omc_svc daemon-reload
 for f in crontab fleet.env; do
   sed "s|@OMC_HOME@|$home|g; s|@OMC_DATA@|$data|g; s|@DOCKER_HOST@|$DOCKER_HOST|g; s|@HOME@|$HOME|g" \
     "$here/templates/$f" > "$data/etc/$f"

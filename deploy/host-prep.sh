@@ -3,7 +3,8 @@
 # usage: deploy/host-prep.sh [--dry-run] [--install-packages] <name>
 #
 # Creates user omc-<name> (no wheel, no docker group) with its own rootless Docker daemon, run as
-# an OpenRC user service under user.omc-<name>. Nothing else on the host is touched.
+# a user service: OpenRC (started by user.omc-<name>) or systemd (the user's lingering manager).
+# Nothing else on the host is touched.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
@@ -28,25 +29,33 @@ user=$(omc_user "$name")
 state=$(omc_user_state "$name")
 [ "$state" = foreign ] && die "user $user exists but is not an OMC instance (no ~/.omc-instance); refusing"
 [ "$(id -u)" = 0 ] || die "run as root"
+init=$(omc_init)
+[ "$init" != none ] || die "this host runs neither OpenRC nor systemd; OMC needs OpenRC or systemd"
 
-# 1. Packages (Gentoo). Installed only on request.
-missing=()
-command -v docker >/dev/null || missing+=(app-containers/docker app-containers/docker-cli)
-command -v newuidmap >/dev/null || missing+=(sys-apps/shadow)
-command -v bwrap >/dev/null || missing+=(sys-apps/bubblewrap)
-command -v slirp4netns >/dev/null || missing+=(app-containers/slirp4netns)
-command -v git >/dev/null || missing+=(dev-vcs/git)
-command -v curl >/dev/null || missing+=(net-misc/curl)
-python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null || missing+=(dev-lang/python)
+# 1. Packages: emerge (Gentoo) or apt (Debian/Ubuntu). Installed only on request.
+pm=$(omc_pkg_manager)
+read -ra missing <<<"$(omc_missing_packages "$pm")"
 if [ ${#missing[@]} -gt 0 ]; then
-  [ "$pkgs" = 1 ] || [ "$dry" = 1 ] || die "missing packages: ${missing[*]} (re-run with --install-packages, or emerge --noreplace them)"
-  run emerge --noreplace "${missing[@]}"
+  [ "$pkgs" = 1 ] || [ "$dry" = 1 ] || die "missing packages: ${missing[*]} (re-run with --install-packages, or install them with $pm)"
+  case $pm in
+    emerge) run emerge --noreplace "${missing[@]}" ;;
+    apt)
+      if [[ " ${missing[*]} " == *" docker-ce "* ]]; then  # Docker's own repository
+        distro=$(. /etc/os-release && echo "$ID") codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+        run install -m 0755 -d /etc/apt/keyrings
+        run curl -fsSL "https://download.docker.com/linux/$distro/gpg" -o /etc/apt/keyrings/docker.asc
+        run sh -c "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$distro $codename stable' > /etc/apt/sources.list.d/docker.list"
+      fi
+      run apt-get update
+      run apt-get install -y "${missing[@]}" ;;
+    *) die "no supported package manager (emerge or apt); install the equivalents of: ${missing[*]}" ;;
+  esac
 fi
 
 # Rootless networking (slirp4netns) needs the TUN device; load it now and at every boot.
 if [ ! -c /dev/net/tun ]; then
   run modprobe tun
-  run mkdir -p /etc/modules-load.d  # read by OpenRC's modules service at boot
+  run mkdir -p /etc/modules-load.d  # read at boot by OpenRC's modules service and systemd-modules-load
   [ -f /etc/modules-load.d/omc-tun.conf ] || run sh -c 'echo tun > /etc/modules-load.d/omc-tun.conf'
 fi
 
@@ -83,21 +92,39 @@ for f in /etc/subuid /etc/subgid; do
   grep -q "^$user:" "$f" 2>/dev/null || run sh -c "echo '$user:$start:65536' >> $f"
 done
 
-# 5. The user's rootless Docker as an OpenRC user service, its session started by user.omc-<name>.
-svc=$home/.config/rc
-as_user mkdir -p "$svc/init.d" "$svc/runlevels/default"
-sed "s|@EXTRAS@|$extras|g" "$here/templates/openrc/dockerd" |
-  as_user sh -c 'cat > "$1" && chmod 0755 "$1"' _ "$svc/init.d/dockerd"
-as_user ln -sfn ../../init.d/dockerd "$svc/runlevels/default/dockerd"
+# 5. The user's rootless Docker as a user service.
+if [ "$init" = systemd ]; then
+  # Lingering starts the user's systemd manager at boot, without a login.
+  svc=$home/.config/systemd/user
+  as_user mkdir -p "$svc" "$home/.local/state"
+  sed "s|@EXTRAS@|$extras|g" "$here/templates/systemd/dockerd.service" |
+    as_user sh -c 'cat > "$1"' _ "$svc/dockerd.service"
+  run loginctl enable-linger "$user"
+  uid=$(id -u "$user" 2>/dev/null || echo "<uid of $user>")
+  if [ "$dry" = 0 ]; then
+    for _ in $(seq 30); do [ -S "/run/user/$uid/systemd/private" ] && break; sleep 1; done
+  fi
+  as_user env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user daemon-reload
+  as_user env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user enable --now dockerd
+else
+  # OpenRC: user.omc-<name> starts the user's session, which starts its default runlevel.
+  svc=$home/.config/rc
+  as_user mkdir -p "$svc/init.d" "$svc/runlevels/default"
+  sed "s|@EXTRAS@|$extras|g" "$here/templates/openrc/dockerd" |
+    as_user sh -c 'cat > "$1" && chmod 0755 "$1"' _ "$svc/init.d/dockerd"
+  as_user ln -sfn ../../init.d/dockerd "$svc/runlevels/default/dockerd"
+fi
 # Login shells (su - omc-<name>) talk to the instance's own daemon and user services.
 grep -qs DOCKER_HOST "$home/.bash_profile" ||
   printf '%s\n' 'export XDG_RUNTIME_DIR=/run/user/$(id -u)' 'export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock' |
   as_user sh -c 'cat >> "$1"' _ "$home/.bash_profile"
-run ln -sfn user "/etc/init.d/user.$user"
-run rc-update add "user.$user" default
-run rc-service "user.$user" start
-# Recovers a dockerd that failed its first start; the session may already be starting it.
-run su - "$user" -c "rc-service -U dockerd status >/dev/null 2>&1 || rc-service -U dockerd start" || true
+if [ "$init" = openrc ]; then
+  run ln -sfn user "/etc/init.d/user.$user"
+  run rc-update add "user.$user" default
+  run rc-service "user.$user" start
+  # Recovers a dockerd that failed its first start; the session may already be starting it.
+  run su - "$user" -c "rc-service -U dockerd status >/dev/null 2>&1 || rc-service -U dockerd start" || true
+fi
 
 # 6. Wait for the instance's daemon to answer as rootless.
 if [ "$dry" = 0 ]; then
