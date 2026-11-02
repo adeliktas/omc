@@ -11,16 +11,21 @@ cp -r "$root/deploy" "$home/deploy"
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 printf 'BACKEND_PORT=1\nFRONTEND_PORT=2\nOMNIROUTE_PORT=3\nLOCAL_AUTH_TOKEN=t\n' > "$home/data/.env"
 echo '[]' > "$tmp/boards.json"
-python3 - "$port" "$tmp/boards.json" <<'PY' &
-import http.server, sys
-port, boards = int(sys.argv[1]), sys.argv[2]
+python3 - "$port" "$tmp" <<'PYSTUB' &
+import http.server, sys, pathlib
+port, root = int(sys.argv[1]), pathlib.Path(sys.argv[2])
+FILES = {"/api/v1/boards": "boards.json", "/api/v1/gateways": "gateways.json",
+         "/api/v1/agents": "agents.json"}
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        body = open(boards, "rb").read()
-        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(body)
+        name = FILES.get(self.path.split("?")[0], "boards.json")  # boards.json doubles for /v1/models
+        f = root / name
+        body = f.read_bytes() if f.exists() else b"[]"
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.end_headers(); self.wfile.write(body)
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
-PY
+PYSTUB
 stub=$!
 trap 'kill $stub; rm -rf "$tmp"' EXIT
 sleep 0.5
@@ -28,13 +33,25 @@ out=$(OMC_SETUP_MC_URL=http://127.0.0.1:$port "$home/deploy/setup.sh" --step 6 <
 { [ $rc -ne 0 ] && grep -q "no board yet" <<<"$out"; } || { echo "FAIL empty board list passed: rc=$rc $out"; fail=1; }
 grep -qx 6 "$home/data/state/setup-done" && { echo "FAIL step 6 recorded without a board"; fail=1; }
 echo '{"items": [{"id": "b1", "name": "Demo"}]}' > "$tmp/boards.json"
+echo '{"items": [{"id": "a1", "board_id": "b1", "is_board_lead": false}]}' > "$tmp/agents.json"
 out=$(OMC_SETUP_MC_URL=http://127.0.0.1:$port "$home/deploy/setup.sh" --step 6 </dev/null 2>&1); rc=$?
-{ [ $rc -eq 0 ] && grep -qx 6 "$home/data/state/setup-done"; } || { echo "FAIL board present did not pass: rc=$rc $out"; fail=1; }
+{ [ $rc -ne 0 ] && grep -q "no board has a lead agent" <<<"$out"; } || { echo "FAIL a board without a lead passed: rc=$rc $out"; fail=1; }
+echo '{"items": [{"id": "a1", "board_id": "b1", "is_board_lead": true}]}' > "$tmp/agents.json"
+out=$(OMC_SETUP_MC_URL=http://127.0.0.1:$port "$home/deploy/setup.sh" --step 6 </dev/null 2>&1); rc=$?
+{ [ $rc -eq 0 ] && grep -qx 6 "$home/data/state/setup-done"; } || { echo "FAIL board with a lead did not pass: rc=$rc $out"; fail=1; }
 echo '[]' > "$tmp/boards.json"
 out=$(OMC_SETUP_MC_URL=http://127.0.0.1:$port "$home/deploy/setup.sh" --step 6 </dev/null 2>&1); rc=$?
 { [ $rc -eq 0 ] && grep -q "already done" <<<"$out"; } || { echo "FAIL finished step was not skipped: rc=$rc $out"; fail=1; }
 out=$(OMC_SETUP_MC_URL=http://127.0.0.1:$port "$home/deploy/setup.sh" --step 5 </dev/null 2>&1); rc=$?
 { [ $rc -ne 0 ] && grep -q "no gateway registered yet" <<<"$out"; } || { echo "FAIL step 5 passed without a gateway: rc=$rc $out"; fail=1; }
+# A registered gateway must teach the backend its address: without it the watchdog reports the
+# gateway down and nothing is dispatched (2026-11-02).
+printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/docker"; chmod +x "$tmp/bin/docker"
+echo '{"items": [{"url": "ws://192.0.2.10:13010", "token": "gw-token"}]}' > "$tmp/gateways.json"
+out=$(PATH="$tmp/bin:$PATH" OMC_SETUP_MC_URL=http://127.0.0.1:$port "$home/deploy/setup.sh" --step 5 </dev/null 2>&1); rc=$?
+{ [ $rc -eq 0 ] && grep -q "reaches the gateway at 192.0.2.10:13010" <<<"$out"; } || { echo "FAIL step 5 did not record the gateway: rc=$rc $out"; fail=1; }
+grep -qx 'OPENCLAW_GATEWAY_HOST=192.0.2.10' "$home/data/.env" && grep -qx 'OPENCLAW_GATEWAY_PORT=13010' "$home/data/.env" &&
+  grep -qx 'OPENCLAW_GATEWAY_TOKEN=gw-token' "$home/data/.env" || { echo "FAIL gateway env not written"; fail=1; }
 # Step 3 reads an OpenAI-style model list ({"data": [...]}) from this instance's OmniRoute.
 echo '{"object": "list", "data": [{"id": "auto/best-chat"}, {"id": "omniroute-auto"}]}' > "$tmp/boards.json"
 sed -i "s/^OMNIROUTE_PORT=.*/OMNIROUTE_PORT=$port/" "$home/data/.env"

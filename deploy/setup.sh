@@ -109,12 +109,49 @@ info_5() {
   if [ -t 0 ]; then python3 "$here/components.py"; fi
 }
 check_5() {
-  [ -n "$(api "$MC/api/v1/gateways" | items)" ] || { echo "  no gateway registered yet"; return 1; }
+  local gws host port tok
+  gws=$(api "$MC/api/v1/gateways") || return 1
+  [ -n "$(items <<<"$gws")" ] || { echo "  no gateway registered yet"; return 1; }
+  # Mission Control only drives tasks/PEV while its backend can reach the gateway, so record the
+  # address the operator registered. Containers reach the host on its LAN address, never loopback.
+  read -r host port tok <<<"$(python3 -c '
+import json, sys
+rows = json.load(sys.stdin).get("items") or []
+url = (rows[0].get("url") if rows else "") or ""
+hostpart = url.split("://", 1)[-1].rsplit(":", 1)[0]
+port = url.rsplit(":", 1)[-1] if ":" in url else ""
+print(hostpart, port if port.isdigit() else "", rows[0].get("token", "") if rows else "")' <<<"$gws")"
+  if [ -n "$host" ] && [ -n "$port" ]; then
+    if [ "${OPENCLAW_GATEWAY_HOST:-}" != "$host" ] || [ "${OPENCLAW_GATEWAY_PORT:-}" != "$port" ]; then
+      set_env OPENCLAW_GATEWAY_HOST "$host"
+      set_env OPENCLAW_GATEWAY_PORT "$port"
+      [ -z "$tok" ] || set_env OPENCLAW_GATEWAY_TOKEN "$tok"
+      (cd "$home" && docker compose up -d backend webhook-worker >/dev/null 2>&1)
+      echo "  backend now reaches the gateway at $host:$port"
+    fi
+  else
+    echo "  gateway registered without a host:port URL; set OPENCLAW_GATEWAY_HOST/PORT in data/.env"
+  fi
 }
 
-info_6() { echo "  Create your first board (Boards -> New board)."; show_url "$UI/boards"; }
+info_6() {
+  echo "  Create your first board with Boards -> New board. Board onboarding provisions its lead agent;"
+  echo "  a board created through the bare API has no lead, and nothing triages its tasks."
+  show_url "$UI/boards"
+}
 check_6() {
-  [ -n "$(api "$MC/api/v1/boards" | items)" ] || { echo "  no board yet"; return 1; }
+  local boards leads
+  boards=$(api "$MC/api/v1/boards") || return 1
+  [ -n "$(items <<<"$boards")" ] || { echo "  no board yet"; return 1; }
+  leads=$(api "$MC/api/v1/agents" | python3 -c '
+import json, sys
+rows = json.load(sys.stdin).get("items") or []
+print(sum(1 for a in rows if a.get("is_board_lead") and a.get("board_id")))')
+  [ "${leads:-0}" -gt 0 ] || {
+    echo "  no board has a lead agent: create the board through New board (onboarding provisions one),"
+    echo "  or the fleet has nobody to dispatch to and inbox tasks stay untouched"
+    return 1
+  }
 }
 
 info_7() { echo "  Starts the fleet: the team pool and review agent (user services) and the cron jobs."; }
