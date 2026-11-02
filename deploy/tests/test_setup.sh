@@ -47,7 +47,7 @@ out=$(OMC_SETUP_MC_URL=http://127.0.0.1:$port "$home/deploy/setup.sh" --step 5 <
 # A registered gateway must teach the backend its address: without it the watchdog reports the
 # gateway down and nothing is dispatched (2026-11-02).
 printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/docker"; chmod +x "$tmp/bin/docker"
-echo '{"items": [{"url": "ws://192.0.2.10:13010", "token": "gw-token"}]}' > "$tmp/gateways.json"
+echo '{"items": [{"id": "g1", "url": "ws://192.0.2.10:13010", "token": "gw-token"}]}' > "$tmp/gateways.json"
 out=$(PATH="$tmp/bin:$PATH" OMC_SETUP_MC_URL=http://127.0.0.1:$port "$home/deploy/setup.sh" --step 5 </dev/null 2>&1); rc=$?
 { [ $rc -eq 0 ] && grep -q "reaches the gateway at 192.0.2.10:13010" <<<"$out"; } || { echo "FAIL step 5 did not record the gateway: rc=$rc $out"; fail=1; }
 grep -qx 'OPENCLAW_GATEWAY_HOST=192.0.2.10' "$home/data/.env" && grep -qx 'OPENCLAW_GATEWAY_PORT=13010' "$home/data/.env" &&
