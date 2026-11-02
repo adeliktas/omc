@@ -46,6 +46,7 @@ out=$(OMC_SETUP_MC_URL=http://127.0.0.1:$port "$home/deploy/setup.sh" --step 5 <
 { [ $rc -ne 0 ] && grep -q "no gateway registered yet" <<<"$out"; } || { echo "FAIL step 5 passed without a gateway: rc=$rc $out"; fail=1; }
 # A registered gateway must teach the backend its address: without it the watchdog reports the
 # gateway down and nothing is dispatched (2026-11-02).
+mkdir -p "$tmp/bin"
 printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/docker"; chmod +x "$tmp/bin/docker"
 echo '{"items": [{"id": "g1", "url": "ws://192.0.2.10:13010", "token": "gw-token"}]}' > "$tmp/gateways.json"
 out=$(PATH="$tmp/bin:$PATH" OMC_SETUP_MC_URL=http://127.0.0.1:$port "$home/deploy/setup.sh" --step 5 </dev/null 2>&1); rc=$?
@@ -81,6 +82,7 @@ grep -q 'systemctl --user stop mc-team-pool' "$tmp/calls2" || { echo 'FAIL syste
 grep -q 'systemctl --user disable mc-team-pool' "$tmp/calls2" || { echo 'FAIL systemd path did not disable the coding pool'; fail=1; }
 grep -q 'rc-service' "$tmp/calls2" && { echo 'FAIL systemd path called rc-service'; fail=1; }
 # No automated run may open a browser window: with no tty there is no xdg-open, even with $DISPLAY set.
+grep -vx 5 "$home/data/state/setup-done" > "$tmp/done" && mv "$tmp/done" "$home/data/state/setup-done"  # replay step 5
 printf '#!/bin/sh\necho "$*" >> "$OMC_TEST_CALLS.xdg"\n' > "$tmp/bin/xdg-open"
 chmod +x "$tmp/bin/xdg-open"
 out=$(DISPLAY=:99 OMC_INIT=openrc PATH="$tmp/bin:$PATH" HOME="$tmp/no-harness-home" OMC_TEST_CALLS="$tmp/calls3" "$home/deploy/setup.sh" --step 5 </dev/null 2>&1); rc=$?
