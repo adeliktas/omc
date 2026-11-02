@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # setup.sh: a step's check fails until the step is done, then it is remembered and skipped.
 set -u
+unset DISPLAY  # a forwarded X11 display would let these runs open a browser window
 root=$(cd "$(dirname "$0")/../.." && pwd)
 fail=0
 tmp=$(mktemp -d)
@@ -62,5 +63,11 @@ out=$(OMC_INIT=systemd PATH="$tmp/bin:$PATH" HOME="$tmp/no-harness-home" OMC_TES
 grep -q 'systemctl --user stop mc-team-pool' "$tmp/calls2" || { echo 'FAIL systemd path did not stop the coding pool'; fail=1; }
 grep -q 'systemctl --user disable mc-team-pool' "$tmp/calls2" || { echo 'FAIL systemd path did not disable the coding pool'; fail=1; }
 grep -q 'rc-service' "$tmp/calls2" && { echo 'FAIL systemd path called rc-service'; fail=1; }
+# No automated run may open a browser window: with no tty there is no xdg-open, even with $DISPLAY set.
+printf '#!/bin/sh\necho "$*" >> "$OMC_TEST_CALLS.xdg"\n' > "$tmp/bin/xdg-open"
+chmod +x "$tmp/bin/xdg-open"
+out=$(DISPLAY=:99 OMC_INIT=openrc PATH="$tmp/bin:$PATH" HOME="$tmp/no-harness-home" OMC_TEST_CALLS="$tmp/calls3" "$home/deploy/setup.sh" --step 5 </dev/null 2>&1); rc=$?
+{ grep -q 'localhost:2/gateways' <<<"$out"; } || { echo "FAIL step 5 did not print the gateway URL: $out"; fail=1; }
+[ ! -e "$tmp/calls3.xdg" ] || { echo 'FAIL an automated run tried to open a browser'; fail=1; }
 [ "$fail" = 0 ] && echo "PASS setup"
 exit "$fail"

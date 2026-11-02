@@ -30,7 +30,7 @@ mkdir -p "$data/state" && touch "$done_file"
 
 api() { curl -fsS -H "Authorization: Bearer $LOCAL_AUTH_TOKEN" -H "Content-Type: application/json" "$@"; }
 items() { python3 -c 'import json, sys; d = json.load(sys.stdin); d = d.get("items", d.get("data", [])) if isinstance(d, dict) else d; print("\n".join(str(x.get("id", "")) for x in d))'; }  # MC pages or OpenAI lists
-show_url() { echo "  -> $1"; if [ -n "${DISPLAY:-}" ] && command -v xdg-open >/dev/null; then xdg-open "$1" >/dev/null 2>&1 || true; fi; }
+show_url() { echo "  -> $1"; if [ -t 0 ] && [ -t 1 ] && [ -n "${DISPLAY:-}" ] && command -v xdg-open >/dev/null; then xdg-open "$1" >/dev/null 2>&1 || true; fi; }
 ask() { local a=""; [ -t 0 ] && read -rp "  $1" a; echo "$a"; }
 ask_secret() { local a=""; if [ -t 0 ]; then read -rsp "$1" a; echo >&2; fi; printf '%s' "$a"; }
 set_env() { # <key> <value>: replace or append in data/.env
