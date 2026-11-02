@@ -38,7 +38,7 @@ Optional keys:
 | `OMNIROUTE_PAYLOAD_RULES` | host path of the payload rules file |
 | `VLLM_HEALTH_URL` | `/v1/models` URL of a local vLLM, used to show its health and context size (unset: none) |
 | `PRIVATE_BOARD_IDS` | comma-separated board ids whose content may only reach local models (unset: none) |
-| `OPENCLAW_GATEWAY_HOST`, `OPENCLAW_GATEWAY_TOKEN` | an OpenClaw gateway, if you run one |
+| `OPENCLAW_GATEWAY_HOST`, `OPENCLAW_GATEWAY_PORT`, `OPENCLAW_GATEWAY_TOKEN` | the OpenClaw gateway this instance drives: host-only address reachable from the containers (the Docker bridge), the port from `~/.openclaw/openclaw.json`, and its token. All three must be set, or Mission Control treats the gateway as down and never dispatches |
 | `HOST_OPENCLAW_HOME`, `HOST_OPENCLAW_UID` | host path and owner of the mounted `~/.openclaw` |
 
 ## `data/etc/mc-team/fleet.json`

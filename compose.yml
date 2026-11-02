@@ -124,7 +124,8 @@ services:
       # `openclaw infer model run --gateway`). When unset, the option
       # rejects requests with a clear 400 error. The host:port points
       # at the gateway's OpenAI-compat /v1/chat/completions endpoint.
-      OPENCLAW_GATEWAY_HOST: ${OPENCLAW_GATEWAY_HOST:-172.17.0.1:18789}
+      OPENCLAW_GATEWAY_HOST: ${OPENCLAW_GATEWAY_HOST:-172.17.0.1}
+      OPENCLAW_GATEWAY_PORT: ${OPENCLAW_GATEWAY_PORT:-18789}
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -225,7 +226,8 @@ services:
       OPENCLAW_GATEWAY_DEVICE_IDENTITY_PATH: /home/host_openclaw/identity/mc-backend-device.json
       HOST_OPENCLAW_UID: "${HOST_OPENCLAW_UID:-0}"
       PRIVATE_BOARD_IDS: ${PRIVATE_BOARD_IDS:-}
-      OPENCLAW_GATEWAY_HOST: ${OPENCLAW_GATEWAY_HOST:-172.17.0.1:18789}
+      OPENCLAW_GATEWAY_HOST: ${OPENCLAW_GATEWAY_HOST:-172.17.0.1}
+      OPENCLAW_GATEWAY_PORT: ${OPENCLAW_GATEWAY_PORT:-18789}
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
     volumes:
       - ${HOME}/.openclaw:/home/host_openclaw

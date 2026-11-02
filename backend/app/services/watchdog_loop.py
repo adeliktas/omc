@@ -99,7 +99,15 @@ _TESTS_DB = Path(os.environ.get("TESTS_DB_FILE", "/traffic-data/tests.db"))
 _REVIEW_FILE = Path(os.environ.get("REVIEW_FILE", "/traffic-data/OWNER_REVIEW.json"))
 
 _GATEWAY_HOST = os.environ.get("OPENCLAW_GATEWAY_HOST", "host.docker.internal")
-_GATEWAY_PORT = int(os.environ.get("OPENCLAW_GATEWAY_PORT", "18789"))
+# The host value may carry its own port ("172.17.0.1:13010"); appending another one yields an
+# unresolvable "host:port:port" and the watchdog then reports the gateway down forever (2026-11-02).
+_gw_host_value, _, _gw_host_port = _GATEWAY_HOST.rpartition(":")
+if _gw_host_port.isdigit():
+    _GATEWAY_HOST = _gw_host_value or _gw_host_port
+    _PORT_FROM_HOST = int(_gw_host_port)
+else:
+    _PORT_FROM_HOST = 0
+_GATEWAY_PORT = int(os.environ.get("OPENCLAW_GATEWAY_PORT") or _PORT_FROM_HOST or 18789)
 _gw_probe_ts: float = 0.0
 _gw_probe_state: bool = False
 _gw_consecutive_failures: int = 0
