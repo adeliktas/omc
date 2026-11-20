@@ -33,7 +33,7 @@ Optional keys:
 
 | Key | Meaning |
 |---|---|
-| `OMNIROUTE_DASHBOARD_URL` | where the Providers page redirects (default: the host the browser used, on `OMNIROUTE_PORT`, `/dashboard/providers`) |
+| `OMNIROUTE_DASHBOARD_URL` | where the Providers page redirects (default `http://localhost:<OMNIROUTE_PORT>/dashboard/providers`) |
 | `OMNIROUTE_PAYLOAD_RULES` | host path of the payload rules file |
 | `VLLM_HEALTH_URL` | `/v1/models` URL of a local vLLM, used to show its health and context size (unset: none) |
 | `PRIVATE_BOARD_IDS` | comma-separated board ids whose content may only reach local models (unset: none) |

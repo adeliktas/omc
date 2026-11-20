@@ -5012,6 +5012,7 @@ async def _autorecover_providers() -> int:
         return result
 
     flips = 0
+    recovered: list[ProviderCapacity] = []
     try:
         async with async_session_maker() as db:
             rows = (await db.execute(sa_select(ProviderCapacity))).scalars().all()
@@ -5041,6 +5042,8 @@ async def _autorecover_providers() -> int:
                     p.status = new_status
                     p.last_error = typed_error
                     flips += 1
+                    if alive:
+                        recovered.append(p)
                 elif alive and typed_error and p.last_error != typed_error:
                     # Online-stable but the probe found something actionable
                     # (quota/auth/empty list) — record the MORE specific state.
@@ -5052,6 +5055,20 @@ async def _autorecover_providers() -> int:
             await db.commit()
     except Exception as exc:
         logger.warning("provider_autorecover.failed err=%s", exc)
+        return flips
+    # The traffic gate mirrors offline into OmniRoute, so recovery must mirror online too.
+    # 2026-10-30: it did not; OmniRoute kept the recovered local model switched off and the
+    # reverse sync turned MC offline again, so one gate became an outage with no way back.
+    if recovered:
+        try:
+            from app.api.provider_capacity import _omniroute_sync_provider_upsert
+            for p in recovered:
+                await _omniroute_sync_provider_upsert(
+                    p.provider_name, p.base_url, p.api_key, "online",
+                    max_concurrent=p.max_concurrent, priority=p.priority,
+                )
+        except Exception as exc:
+            logger.warning("provider_autorecover.or_sync_failed err=%s", exc)
     return flips
 
 

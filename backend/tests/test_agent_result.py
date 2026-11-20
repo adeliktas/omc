@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import pytest
 from pathlib import Path
 
 
@@ -605,11 +606,12 @@ def test_invalid_router_cooldown_fields_keep_conservative_hold(tmp_path: Path) -
     assert _parse(tmp_path, error, provider="omniroute-codex", model="gpt-6.1-sol")["usage"]["unavailable_until"].startswith("9999-")
 
 
-def test_an_unreachable_local_engine_is_held_briefly_and_a_cloud_one_is_not(tmp_path: Path) -> None:
+@pytest.mark.parametrize("error", ["Connection error.", "Request timed out."])  # 11-04: strata over WireGuard
+def test_an_unreachable_local_engine_is_held_briefly_and_a_cloud_one_is_not(tmp_path: Path, error: str) -> None:
     # 2026-10-26: metis' vLLM refused connections; with no hold, every draft went there.
     from datetime import datetime, timedelta, timezone
     raw = json.dumps({"type": "turn_end", "message": {
-        "role": "assistant", "content": [], "stopReason": "error", "errorMessage": "Connection error."}})
+        "role": "assistant", "content": [], "stopReason": "error", "errorMessage": error}})
     usage = _parse(tmp_path, raw, provider="metis", model="qwen3.8")["usage"]
     assert usage["availability_reason"] == "endpoint_unreachable"
     until = datetime.fromisoformat(usage["unavailable_until"]) - datetime.now(timezone.utc)

@@ -41,6 +41,7 @@ STEPS = [10, 20, 30]  # minutes; the check spends no tokens, a 4h backoff only h
 MAX_TRIES, OPUS_TIMEOUT, OPUS_PER_DAY, RUNAWAY = 2, 3600, 6, 2_000_000
 REVIEW_EVERY, SHIP_TARGET = 86_400, 0.35  # daily outcome review; busy days shipped 17-23% (2026-10-22/24)
 RETRY_AFTER, DECISION, ME = 6 * 3600, "major_decision", "fleet-watchdog"
+UNCHANGED = "; unchanged since its last Opus run, waits for the board or the intake to move"
 # Owner 2026-10-27: the system must not stop when Opus runs out of usage. gpt-6.1-sol (Pi through
 # OmniRoute's codex pool, ponytail ultra from Pi's own config) takes over with the same prompt
 # until Opus's reset has passed; both read and update HANDOFF so each continues the other's work.
@@ -208,22 +209,9 @@ def last_done(board: str):
         return None
 
 
-def pool_started():
-    """Whether the team pool runs: the host's system service, or an instance user's own one."""
-    if not os.environ.get("OMC_DATA"):  # not an instance (its crontab sets OMC_DATA)
-        return "started" in subprocess.run(["rc-service", "mc-team-pool", "status"], capture_output=True, text=True).stdout
-    if os.environ.get("RUNNER_APPLY") != "1":
-        return True  # a disarmed instance stops its pool on purpose
-    env = {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"}  # cron sets none
-    cmd = (["systemctl", "--user", "is-active", "--quiet", "mc-team-pool"] if Path("/run/systemd/system").is_dir()
-           else ["rc-service", "-U", "mc-team-pool", "status"])
-    return subprocess.run(cmd, capture_output=True, env=env).returncode == 0
-
-
 def findings():
     out = []
-    backend, frontend = os.environ.get("BACKEND_PORT", "8000"), os.environ.get("FRONTEND_PORT", "3000")
-    for name, url in (("backend", f"http://127.0.0.1:{backend}/health"), ("frontend", f"http://127.0.0.1:{frontend}/")):
+    for name, url in (("backend", "http://127.0.0.1:8000/health"), ("frontend", "http://127.0.0.1:3000/")):
         try:
             urllib.request.urlopen(url, timeout=10)
         except Exception as exc:  # noqa: BLE001
@@ -238,7 +226,7 @@ def findings():
     except BaseException as exc:  # noqa: BLE001 - the CLI exits on HTTP errors
         out.append(f"API/database unavailable: {type(exc).__name__}: {str(exc)[:150]}")
         return sorted(set(out))
-    if not pool_started():
+    if "started" not in subprocess.run(["rc-service", "mc-team-pool", "status"], capture_output=True, text=True).stdout:
         out.append("mc-team-pool service is not started")
     now = datetime.now(UTC)
     # Errors logged before the last Opus run ended predate its fix; recounting them paid
@@ -300,6 +288,12 @@ def findings():
                 out.append(f"task {t['id'][:8]} blocked after 4 auto-resumes: {t['title'][:80]}")
         by_id = {t["id"]: t for t in rows}
         for t in rows:
+            # The pool runs only team tasks; a plain task goes to the board lead, and the
+            # private-board lead is on the privacy hold (all tools denied). The owner's UI task sat
+            # 2 days unseen while every check here skipped non-team work (2026-11-05).
+            if (t.get("execution_mode") != "team" and t["status"] in ("inbox", "in_progress")
+                    and now - ts(t["updated_at"]) > timedelta(hours=24)):
+                out.append(f"task {t['id'][:8]} is not a team task and nothing touched it for 24h: {t['title'][:80]}")
             if t["status"] == "inbox" and any(by_id.get(d, {}).get("status") == "cancelled" for d in t.get("blocked_by_task_ids") or []):
                 out.append(f"task {t['id'][:8]} waits on a cancelled dependency")
         # No task waits on the owner (2026-10-26): 7 paused tasks froze their dependents and leads
@@ -345,23 +339,6 @@ def findings():
             since = done and max(done, min(ts(t["created_at"]) if t.get("created_at") else done for t in waiting))
             if since and now - since > timedelta(hours=8):
                 out.append(f"board {board[:8]}: no task finished (published/Done) for over 8h while work is waiting")
-    # An idle fleet with free engines is no success (owner 2026-10-28: 0% LLM use, both plans free,
-    # nothing in progress, while every check here passed). Name what it waits on.
-    for board in json.loads(BOARDS.read_text()) if BOARDS.exists() else []:
-        rows = sql(f"select max(created_at), 1 from team_attempts where board_id = '{board}'")
-        try:
-            idle = now - ts(rows[0][0])
-        except (IndexError, ValueError, TypeError):
-            continue
-        if idle > timedelta(hours=3) and not codex_exhausted():
-            asked = sum(isinstance(i, dict) and i.get("type") == DECISION and i.get("task_board_id") == board for i in pending)
-            try:
-                last_ok = json.loads(INTAKE_STATE.read_text()).get("last_ok") or "never"
-            except (OSError, ValueError):
-                last_ok = "never"
-            feed = (BATCH_LOG.read_text(errors="replace").strip().splitlines() or ["no log"])[-1][:100] if BATCH_LOG.exists() else "no log"
-            out.append(f"board {board[:8]}: idle {int(idle.total_seconds() // 3600)}h with free engines "
-                       f"({asked} owner decisions pending; next-batch: {feed}; last intake: {last_ok[:10]})")
     # The intake logs every pull step and a 10-min heartbeat, metadata only (owner 2026-10-28: "there cannot
     # be some unknown progress"). A held lock with a silent log is a hung run; a failed run is named.
     try:
@@ -375,6 +352,53 @@ def findings():
                 running = True
     except OSError:
         age, last, running = timedelta(0), "", False
+    try:
+        intake = json.loads(INTAKE_STATE.read_text())
+    except (OSError, ValueError):
+        intake = {}
+    try:
+        saw = json.loads(STATE.read_text()).get("seen") or {}
+    except (OSError, ValueError):
+        saw = {}
+    # An idle fleet with free engines is no success (owner 2026-10-28: 0% LLM use, both plans free,
+    # nothing in progress, while every check here passed). Name what it waits on.
+    for board in json.loads(BOARDS.read_text()) if BOARDS.exists() else []:
+        rows = sql(f"select max(created_at), 1 from team_attempts where board_id = '{board}'")
+        try:
+            idle = now - ts(rows[0][0])
+        except (IndexError, ValueError, TypeError):
+            continue
+        if idle > timedelta(hours=3) and not codex_exhausted():
+            asked = sum(isinstance(i, dict) and i.get("type") == DECISION and i.get("task_board_id") == board for i in pending)
+            feed = (BATCH_LOG.read_text(errors="replace").strip().splitlines() or ["no log"])[-1][:100] if BATCH_LOG.exists() else "no log"
+            finding = (f"board {board[:8]}: idle {int(idle.total_seconds() // 3600)}h with free engines ({asked} owner "
+                       f"decisions pending; next-batch: {feed}; last intake: {(intake.get('last_ok') or 'never')[:10]})")
+            # A drained board refills only through the intake, which next-batch starts every 12h. Once an Opus
+            # run on this finding has seen the board idle and the intake's last result, another run on the
+            # same evidence finds nothing (2026-10-30: run 2 repeated run 1 15 min later). It stays logged as
+            # held until the board or the intake moves, or the intake is overdue.
+            # A run over several findings is named after the whole set, so main() also records each finding it saw
+            # (2026-10-31: the outage run saw next-batch's "cannot reach", and run 2 re-read that line 10 min later).
+            seen = max([p.stat().st_mtime for p in RUNS.glob(f"*-{fingerprint(finding)}.json")]
+                       + [saw.get(fingerprint(finding), 0)])
+            tried = intake.get("last_try")
+            # A pull the local model never answered clears last_try and retries every 15 min (1e74afec). While an
+            # interactive session holds vllm's only slot (owner config; never raise it), each retry's log lines
+            # are no new evidence: 2026-10-30 11:50 the first one fired an Opus run that could only wait. Busy for
+            # over a day (due 12h after last_ok), the slot's holder needs a look and the finding fires.
+            busy = ("the local model stopped answering" in last and intake.get("last_ok")
+                    and now - ts(intake["last_ok"]) < timedelta(hours=36))
+            # The intake's news becomes board work on next-batch's next 15-min tick; until that tick has run it is
+            # no evidence yet (2026-10-31: run 2 fired 3 s before the tick that seeded the re-queued issues).
+            news = (now - age).timestamp()
+            if busy or BATCH_LOG.exists() and BATCH_LOG.stat().st_mtime < news:
+                news = 0
+            # A next-batch failure is evidence until a run has seen it; the next tick logs it again if it persists.
+            if (("backlog drained" in feed or BATCH_LOG.exists() and BATCH_LOG.stat().st_mtime < seen)
+                    and (busy or tried and now - ts(tried) < timedelta(hours=13))
+                    and (running or max(ts(rows[0][0]).timestamp(), news) < seen)):
+                finding += UNCHANGED
+            out.append(finding)
     if running and age > timedelta(minutes=30):
         out.append(f"intake running, but its log has been silent for {int(age.total_seconds() // 60)}m (last: {last[:150]})")
     elif not running and age < timedelta(hours=12) and re.match(r"intake \d+ (did not finish|pulled, but evaluation failed)", last):
@@ -612,7 +636,7 @@ def main():
                                 options=item.get("proposed_action") or "", choice=item.get("reviewer_note") or ""),
                  f"decided-{item['id'][:8]}", state)
     elif not found:
-        state["tries"], state["last"] = {}, {}  # a problem that disappeared and comes back gets fresh attempts
+        state["tries"], state["last"], state["seen"] = {}, {}, {}  # a problem that comes back gets fresh attempts
         state["step"] = min(state["step"] + 1, len(STEPS) - 1)
         log(f"healthy; next check in {STEPS[state['step']]} min")
     else:
@@ -622,12 +646,16 @@ def main():
         keys = {f: fingerprint(f) for f in found}
         legacy = state["tries"].get(fingerprint("\n".join(found)), 0)  # state from before per-finding tries
         state["tries"] = {k: state["tries"].get(k, legacy) for k in keys.values()}
+        # A held finding carries UNCHANGED, whose fingerprint differs: keep the mark under its plain one
+        # (2026-11-04: pruning it re-ran Opus 40 min after a combined run had seen the same evidence).
+        live = set(keys.values()) | {fingerprint(f.removesuffix(UNCHANGED)) for f in found}
+        state["seen"] = {k: t for k, t in state.get("seen", {}).items() if k in live}
         # A finding exhausted before run times were kept waits one RETRY_AFTER from now.
         state["last"] = {k: state.get("last", {}).get(k, time.time()) for k in keys.values()}
         waiting = {k for ks in state.get("decisions", {}).values() for k in ks}
         # No give-up: after MAX_TRIES a finding gets one run per RETRY_AFTER, and only a model's
         # ESCALATE line reaches the owner (a bare "could not fix" alert left the owner to debug).
-        new = [f for f in found if not capped and keys[f] not in waiting and (
+        new = [f for f in found if not capped and keys[f] not in waiting and not f.endswith(UNCHANGED) and (
             state["tries"][keys[f]] < MAX_TRIES or time.time() - state["last"][keys[f]] >= RETRY_AFTER)]
         held = [f for f in found if f not in new]
         if held:
@@ -651,6 +679,7 @@ def main():
                 "\n\nEarlier watchdog runs did not clear these; find the structural cause now, or ESCALATE "
                 "if no model can supply what is missing:\n" + "\n".join(f"- {x}" for x in stubborn) if stubborn else "")
             e = escalation(run_agent(PROMPT.format(**PROMPT_PATHS, findings=text, history=history(), handoff=HANDOFF), key, state))
+            state["seen"].update({keys[f]: time.time() for f in new})
             if e and (rid := file_decision(e, new)):
                 # The decision holds the task findings it is about. A board outcome finding keeps its
                 # normal retries, so one task's question never parks a whole idle board (10-29: 18h).

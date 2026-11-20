@@ -159,7 +159,6 @@ services:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-auto}
-        NEXT_PUBLIC_BACKEND_PORT: ${BACKEND_PORT:-8000}
         NEXT_PUBLIC_AUTH_MODE: ${AUTH_MODE}
     # Optional, user-managed env file.
     # IMPORTANT: do NOT load `.env.example` here because it contains non-empty
@@ -169,10 +168,8 @@ services:
         required: false
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-auto}
-      NEXT_PUBLIC_BACKEND_PORT: ${BACKEND_PORT:-8000}
       NEXT_PUBLIC_AUTH_MODE: ${AUTH_MODE}
-      OMNIROUTE_DASHBOARD_URL: ${OMNIROUTE_DASHBOARD_URL:-}
-      OMNIROUTE_PORT: ${OMNIROUTE_PORT:-20128}
+      OMNIROUTE_DASHBOARD_URL: ${OMNIROUTE_DASHBOARD_URL:-http://localhost:${OMNIROUTE_PORT:-20128}/dashboard/providers}
     depends_on:
       - backend
     ports:

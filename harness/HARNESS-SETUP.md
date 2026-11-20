@@ -1,10 +1,7 @@
 # Agent harness setup
 
-OpenClaw is the core gateway harness required for boards. Pi and Claude Code are optional coding
-harnesses. `deploy/setup.sh --components`, run as the instance user, offers explicit interactive
-install/configure/skip choices; nothing is installed without your choice. Missing optional
-harnesses do not block base OpenClaw/PEV setup. See the [install guide](../docs/install.md) for
-an attachable tmux setup terminal.
+OMC's fleet runs coding agents through *harnesses*. The OMC installer never installs a harness.
+Installing one is your choice, done by you or by your own coding agent.
 
 **To hand this to an agent:** "Read `harness/HARNESS-SETUP.md` and set up the harnesses I want."
 
@@ -27,23 +24,14 @@ The placeholders in the templates are:
 ## Pi
 
 ### Purpose
-Optional coding-fleet harness. When configured, the team runner starts Pi for PM, developer,
-specialist and QA attempts. OpenClaw boards and the built-in PEV smoke task do not require Pi.
+The main fleet harness. The team runner starts Pi for PM, developer, specialist and QA attempts.
 
 ### Version
-Verified baseline: `@earendil-works/pi-coding-agent` 1.4.0. The official installer selects its
-current managed release; check the installed version before using it.
+`@earendil-works/pi-coding-agent` 1.4.0.
 
 ### Install
 ```bash
-curl -fsSL https://pi.dev/install.sh | sh
-```
-
-Prefer `deploy/setup.sh --components` for the installer plus guided instance-local model/settings
-configuration, existing-file protection, runner executable wiring and a real model check.
-The extensions/packages below are optional manual additions, not prerequisites:
-
-```bash
+npm install -g @earendil-works/pi-coding-agent@1.4.0
 mkdir -p ~/.pi/agent/npm ~/.pi/agent/extensions
 cp harness/pi/package.json ~/.pi/agent/npm/package.json && (cd ~/.pi/agent/npm && npm install)
 ```
@@ -77,14 +65,17 @@ instance user.
 runs the board's OpenClaw agents.
 
 ### Version
-`openclaw` 2026.9.4.
+`openclaw` 2026.10.33, the extended-stable line. Do not use 2026.11.x yet: it rejects the
+`heartbeat` key Mission Control writes into each agent's config, so agent provisioning fails.
 
 ### Install
-OpenClaw needs Node.js 22 or newer: `emerge net-libs/nodejs`, or unpack the official Linux
+OpenClaw needs Node.js 24.22.1 or newer (its security releases require it): `emerge net-libs/nodejs`, or unpack the official Linux
 binary tarball from nodejs.org into `~/.local/node` and put its `bin/` on your `PATH`.
 
 ```bash
-npm install -g --prefix ~/.local openclaw@2026.9.4
+npm install -g --prefix ~/.local --allow-scripts=@google/genai,esbuild,protobufjs,openclaw \
+  openclaw@2026.10.33
+openclaw doctor --repair --non-interactive  # with the gateway stopped, after every upgrade
 ```
 
 ### Templates
@@ -94,7 +85,7 @@ npm install -g --prefix ~/.local openclaw@2026.9.4
 
 ### Check
 ```bash
-openclaw --version  # OpenClaw 2026.9.4
+openclaw --version  # OpenClaw 2026.10.33
 ```
 
 ### Wiring

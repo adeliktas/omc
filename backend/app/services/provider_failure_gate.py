@@ -70,7 +70,7 @@ def provider_failure_rates(window_seconds: float | None = None) -> dict[str, dic
             cur = conn.cursor()
             rows = cur.execute(
                 """
-                SELECT model, status_code FROM flows
+                SELECT model, status_code, finish_reason FROM flows
                 WHERE ts >= ? AND model IS NOT NULL AND model != ''
                 """,
                 (since,),
@@ -80,7 +80,8 @@ def provider_failure_rates(window_seconds: float | None = None) -> dict[str, dic
     except Exception as exc:
         logger.warning("provider_failure_gate.rates_read_failed err=%s", exc)
         return {}
-    for model, status in rows:
+    busy: Counter = Counter()
+    for model, status, reason in rows:
         if "/" in model:
             prefix, _, _ = model.partition("/")
         else:
@@ -90,7 +91,15 @@ def provider_failure_rates(window_seconds: float | None = None) -> dict[str, dic
         s["total"] += 1
         if status is not None and status >= 400:
             s["errors"] += 1
-    for s in stats.values():
+            busy[prov] += status == 429 and "Semaphore timeout" in (reason or "")
+    for prov, s in stats.items():
+        # 2026-10-30: OmniRoute's semaphore timeouts on a single-slot local model that kept
+        # completing requests gated it offline, cutting off every session using it. A provider
+        # that still serves is busy, not broken; its queue rejections count only when nothing
+        # in the window succeeded (the hung-server case above).
+        if s["errors"] < s["total"]:
+            s["total"] -= busy[prov]
+            s["errors"] -= busy[prov]
         s["error_pct"] = round(s["errors"] * 100 / s["total"], 1) if s["total"] else 0.0
     return stats
 

@@ -32,7 +32,8 @@ Done task. Exhausted caps are CAS-blocked with a durable task comment before
 spawning. The pool never reopens terminal states and never enables providers.
 
 A missing or dirty deployment checkout fails safely: no new children are
-spawned (already-running children keep their own publication guards).
+spawned for the boards publishing into it (already-running children keep their
+own publication guards).
 
 Graceful stop on SIGTERM/SIGINT: stop scanning, terminate every child, wait,
 then SIGKILL anything left — no worker is ever left unmonitored.
@@ -102,26 +103,39 @@ def probe_task_lock(task_id: str) -> bool:
         os.close(fd)
 
 
-def repo_ready() -> bool:
-    """A missing or dirty deployment checkout fails safely: spawn nothing."""
+def repo_ready(repo: Path = REPO) -> bool:
+    """A missing or dirty deployment checkout fails safely: spawn nothing for its boards.
+
+    Each board publishes into its own repo (board-repos.json, else this checkout), the one the
+    runner guards too. Checking only this checkout let one hand edit here idle every fleet
+    board (2026-10-19: 31h; 2026-10-29: 4h).
+    """
     try:
         subprocess.run(
-            ["git", "-C", str(REPO), "rev-parse", "HEAD"],
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
             capture_output=True,
             check=True,
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
-        log(f"deployment checkout {REPO} is missing or not a git repo; idle")
+        log(f"deployment checkout {repo} is missing or not a git repo; idle")
         return False
     dirty = subprocess.run(
-        ["git", "-C", str(REPO), "status", "--porcelain"],
+        ["git", "-C", str(repo), "status", "--porcelain"],
         capture_output=True,
         text=True,
     ).stdout
     if dirty:
-        log("deployment checkout is dirty; not starting new team workers")
+        log(f"deployment checkout {repo} is dirty; not starting its team workers")
         return False
     return True
+
+
+def board_repo(board_id: str) -> Path:
+    """The repo a board publishes into: the same mapping mc-team-runner.py uses."""
+    try:
+        return Path(json.loads(Path(FLEET_BOARDS).read_text()).get(board_id) or REPO)
+    except (OSError, ValueError):
+        return REPO
 
 
 _down_at = -1e9
@@ -839,7 +853,8 @@ def supervise() -> None:
     while not stop.is_set():
         reap(children)
         recover_blocked()
-        if len(children) < TASKS and repo_ready():
+        if len(children) < TASKS:
+            ready: dict[Path, bool] = {}
             # No hold while codex is exhausted: held engines' work is drafted on local Qwen
             # and cycles extend while they wait (owner 2026-10-24).
             for task in sorted(
@@ -852,6 +867,11 @@ def supervise() -> None:
                 task_id = task["id"]
                 if task_id in children or not probe_task_lock(task_id):
                     continue  # already driven locally
+                repo = board_repo(task["board_id"])
+                if repo not in ready:
+                    ready[repo] = repo_ready(repo)
+                if not ready[repo]:
+                    continue
                 try:
                     if not budget_ready(task):
                         continue

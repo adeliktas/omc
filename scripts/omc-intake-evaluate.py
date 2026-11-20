@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local half of the fleet intake: raw pulls -> redacted evaluation + todos for sync.py.
+"""Local half of the fleet intake: raw pulls -> redacted evaluation + todos for omc-todo-sync.py.
 
 Runs on this host only, against WORK/raw/<stamp>/{jira,confluence,mattermost}.json written by the
 local pull session. Local Qwen (WORK/redact.py's endpoint) evaluates changed pages and posts; the
@@ -14,6 +14,8 @@ import json
 import os
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -34,6 +36,7 @@ Output ONLY one JSON object:
 - One sentence per entry, technical and neutral.
 - REMOVE completely: personal names (use roles like "the team" or "an engineer"), customer or company names other than your own organization, e-mail addresses, hostnames, IP addresses, URLs, credentials and tokens. Never copy sentences that contain any of these."""
 SYSTEM = SYSTEM.replace("the TEAM", "the " + INTAKE.get("team", "engineering team"))
+BUSY_WAIT = 1800  # seconds a request waits out the local model's busy slot
 SECTIONS = (("Decisions", "decisions"), ("Requested changes to the AI agent fleet", "agent_fleet_changes"),
             ("Priorities and deadlines", "priorities"), ("Open questions", "open_questions"), ("Next steps", "next_steps"))
 
@@ -63,13 +66,26 @@ def evaluate(pages: list, posts: list) -> dict:
     return merged
 
 
+def ask(req: urllib.request.Request) -> bytes:
+    """2026-10-30: the local model has one OmniRoute slot; a request queued behind an interactive session
+    gets a 429 after 30 s. That is a wait, not a failure: it dropped a complete 50-min pull."""
+    deadline = time.monotonic() + BUSY_WAIT
+    while True:
+        try:
+            return urllib.request.urlopen(req, timeout=900).read()
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or time.monotonic() > deadline:
+                raise
+        time.sleep(30)
+
+
 def _evaluate(pages: list, posts: list) -> dict:
     material = "\n\n".join(f"PAGE: {p.get('title')}\n{str(p.get('text'))[:6000]}" for p in pages)
     material += "\n\nMATTERMOST POSTS:\n" + "\n".join(f"- [{p.get('channel')}] {str(p.get('message'))[:1500]}" for p in posts)
     body = {"model": MODEL, "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": material}],
             "temperature": 0.2, "max_tokens": 4000, "chat_template_kwargs": {"enable_thinking": False}}
     req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"})
-    text = json.loads(urllib.request.urlopen(req, timeout=900).read())["choices"][0]["message"]["content"]
+    text = json.loads(ask(req))["choices"][0]["message"]["content"]
     try:
         found = json.loads(re.search(r"\{.*\}", text, re.S).group(0))
     except (AttributeError, ValueError):

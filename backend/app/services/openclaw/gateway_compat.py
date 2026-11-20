@@ -48,7 +48,8 @@ def _parse_version_parts(value: str) -> tuple[int, ...] | None:
     revision = int(match.group("rev") or 0)
     if month < 1 or month > 12:
         return None
-    if day < 1 or day > 31:
+    # Not a calendar day: OpenClaw numbers releases within a month past 31 (2026.10.33).
+    if day < 1:
         return None
     return (year, month, day, revision)
 

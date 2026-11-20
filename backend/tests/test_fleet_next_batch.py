@@ -163,6 +163,21 @@ def test_seeded_catalog_preserves_issue_body_as_reference_material(monkeypatch):
     assert "should not appear" not in lead["description"] and "human only" not in lead["description"]
 
 
+def test_catalog_keeps_a_sync_sized_body_whole_and_marks_any_cut(monkeypatch):
+    # 2026-10-29: a silent 1200-char cut ended an issue on "- [ ] The AI"; the offline planner
+    # asked humans to "supply the missing acceptance criterion" and labeled it human-only.
+    whole = "Scope\n" + "x" * 1400 + "\n- [ ] The AI analysis trigger is defined."
+    huge = "Scope\n" + "\n".join("y" * 99 for _ in range(60))
+    issues = [{"number": 1, "title": "a", "body": whole, "labels": []},
+              {"number": 2, "title": "b", "body": huge, "labels": []}]
+    nb, calls = load(monkeypatch, [], issues)
+    nb.main()
+    desc = next(c[2] for c in calls if c[0] == "POST" and c[1].endswith("/tasks"))["description"]
+    assert whole in desc
+    cut = desc.split("#2 b\n", 1)[1]
+    assert "shortened" in cut and "y" * 99 + "\n(" in cut  # cut on a line, and says so
+
+
 def test_lead_with_a_paused_child_stays_open(monkeypatch):
     # 0000a018 was closed while 0000a01d was paused; resuming the child then failed ("parent ... no longer in progress").
     tasks = [{"id": "L", "title": "[backlog] Fleet: x", "status": "in_progress", "updated_at": "u"},
@@ -178,3 +193,23 @@ def test_a_drained_backlog_starts_the_local_intake(monkeypatch):
     nb.main()
     assert [Path(argv[1]).name for argv in nb.started] == ["omc-intake.py"]
     assert not [c for c in calls if c[0] == "POST"]  # nothing to seed
+
+
+def test_github_5xx_is_retried_and_other_gh_errors_name_the_cause(monkeypatch):
+    # 2026-11-03 13:00Z: one GraphQL 503 crashed a tick with a bare traceback and woke the Opus watchdog.
+    import subprocess
+    nb, calls = load(monkeypatch, [], [{"number": 7, "title": "i7"}])
+    monkeypatch.setattr(nb.time, "sleep", lambda s: None)
+    answers = iter([subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 503: No server is currently available")])
+
+    def run(argv, **k):
+        e = next(answers, None)
+        if e:
+            raise e
+        return type("R", (), {"stdout": json.dumps([] if argv[1] == "pr" else [{"number": 7, "title": "i7"}])})()
+    monkeypatch.setattr(nb.subprocess, "run", run)
+    nb.main()
+    assert [c for c in calls if c[0] == "POST" and c[1].endswith("/tasks")]  # seeded after the retry
+    answers = iter([subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 401: Bad credentials")])
+    with pytest.raises(SystemExit, match="gh issue list failed: HTTP 401: Bad credentials"):
+        nb.main()

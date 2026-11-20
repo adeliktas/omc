@@ -217,6 +217,9 @@ def git(cwd, *args, env=None, check=True, raw=False) -> str | bytes:
     return p.stdout if raw else p.stdout.rstrip()
 
 
+BUILDS_ON = re.compile(r"^Builds on branch: ([\w./-]+)$", re.M)
+
+
 def dependency_branches(task: dict) -> list[str]:
     """Newest published fleet branch (origin/omc/<task8>-*) of each dependency, if any. A split
     dependency publishes nothing itself, so its published child tasks stand in for it (2026-10-26)."""
@@ -236,7 +239,11 @@ def dependency_branches(task: dict) -> list[str]:
     refs = (git(REPO, "for-each-ref", "--sort=-committerdate", "--count=1", "--format=%(refname:short)",
                 f"refs/remotes/origin/omc/{dep[:8]}-*", check=False)
             for dep in deps)
-    return [r for r in refs if r]
+    # A human's unmerged PR branch a task builds on (owner 2026-11-04: the fleet fixes an open
+    # PR). Split parts carry it too: they quote the parent's description. The published branch
+    # then fast-forwards that PR branch.
+    named = (f"origin/{b}" for b in BUILDS_ON.findall(task.get("description") or ""))
+    return [r for r in refs if r] + [r for r in named if git(REPO, "rev-parse", "-q", "--verify", r, check=False)]
 
 
 def contains(ref: str, commit: str) -> bool:
@@ -246,9 +253,11 @@ def contains(ref: str, commit: str) -> bool:
 
 
 WORKFLOWS = ".github/workflows"
-CI_NOTE = (f"\n\nCI workflow edits ({WORKFLOWS}) cannot be pushed by this fleet: publication moves "
-           "them into the pull request body for a human to add. Plan them like any file, but no "
-           "acceptance criterion may depend on CI running them before a human merges.")
+# Owner 2026-11-04: the fleet clone pushes over SSH, so workflow edits ship like any file; the
+# PR-body fallback below only runs if a push is refused for the `workflow` scope.
+CI_NOTE = (f"\n\nCI workflow edits ({WORKFLOWS}) are pushed with the pull request like any other "
+           "file; no PR-body copy of their diff is needed. No acceptance criterion may depend on "
+           "CI running them before publication.")
 
 
 def without_workflows(sha: str) -> tuple[str, str]:
@@ -2019,10 +2028,11 @@ class Cycle:
             api("post", pub + "/fail", {"version": ver, "reason": why})
             return
         api("post", pub + "/complete", {"sha": sha, "version": ver})
-        if sha == pre:
+        if sha == pre or (REPO != MC_REPO and sha == cycle.get("base_sha")):
             # Evidence-only verification (all-no-change cycle): the reviewed
-            # commit IS the current production HEAD. Record that truthfully and
-            # deploy nothing — there is no deployment diff to apply.
+            # commit IS the current production HEAD (or, on a PR repo, the cycle's
+            # own base: the shared clone's HEAD belongs to whichever cycle ran last).
+            # Record that truthfully and deploy or open nothing — there is no diff.
             self.comment(
                 f"**team-runner**: published the QA-verified commit {sha[:10]} with NO "
                 "code change — it is the current production HEAD. Git HEAD is unchanged "

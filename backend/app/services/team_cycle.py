@@ -1119,11 +1119,14 @@ async def _retry_or_block(
     # complexity-5 leaf each ran 1h, then blocked their cycles as 'not retryable unchanged').
     # A local server that refused the connection is the same: the draft never ran (2026-10-26:
     # metis was down while codex was held; 22 cycles blocked "failed after 2 attempts").
+    # Any other model-side failure of a local engine is the same: one local try per stage, never
+    # a strike (2026-11-04: strata said "Request timed out." over a dead WireGuard link, 0/21 ever;
+    # metis at 16k context replied empty, 0/95 since 10-25; 3 cycles blocked "after 4 attempts").
     slow_draft = (a.provider in LOCAL_PROVIDERS and member is not None
                   and member.provider not in LOCAL_PROVIDERS
-                  and bool(re.match(r"interrupted: attempt time limit reached|"
-                                    r"connection error\.?$|.*(?:ECONNREFUSED|connection refused)",
-                                    cause.strip(), re.I)))
+                  and (bool(re.match(r"interrupted: attempt time limit reached|"
+                                     r"connection error\.?$|.*(?:ECONNREFUSED|connection refused)",
+                                     cause.strip(), re.I)) or not _HOST_FAILURE.match(cause)))
     if re.search(r"refresh_token_reused|invalid_grant|credential store read failed", cause, re.I):
         await _block(
             session,

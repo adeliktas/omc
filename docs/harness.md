@@ -1,9 +1,8 @@
 # Agent harnesses
 
-OpenClaw is the core gateway harness required for boards. Pi and Claude Code are optional coding
-harnesses. `deploy/setup.sh --components` offers interactive install/configure/skip choices as the
-instance user; an installer only runs after an explicit choice. Skipping optional harnesses leaves
-OpenClaw and the built-in PEV lane available, with the optional coding fleet disarmed. [harness/HARNESS-SETUP.md](../harness/HARNESS-SETUP.md) gives the install
+The fleet runs coding work through agent harnesses: Pi first, then OpenClaw and Claude Code. OMC
+never installs one. The OpenClaw gateway is the one you need in any case, because every board
+belongs to a gateway. [harness/HARNESS-SETUP.md](../harness/HARNESS-SETUP.md) gives the install
 command, version, templates and check for each. You can follow it yourself or hand it to your own
 coding agent.
 

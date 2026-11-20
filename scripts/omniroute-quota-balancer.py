@@ -74,11 +74,21 @@ def release(model, now):
         check=True, capture_output=True, timeout=60)
 
 
+def headroom(a):
+    """(weekly, session) remaining %. OmniRoute 3.8.54 reports a single-window (free) plan as
+    `unknown_primary` with weekly/session null; a window it did not observe counts as none left."""
+    primary = a.get("unknown_primary") or 0
+    return tuple(primary if a.get(k) is None else a[k] for k in ("weekly", "session"))
+
+
 def order(accounts):
-    """accounts: {id: {"weekly": pct, "session": pct}} -> ids, most headroom first."""
+    """accounts: {id: {"weekly": pct, "session": pct, "restricted": bool}} -> ids, most headroom
+    first. Restricted accounts (an "Excluded Models" list: free plans that serve only luna/terra,
+    owner 2026-11-04) go before full ones, so their models use them and the one plan that also
+    serves sol keeps its quota for sol; OmniRoute never routes an excluded model to them anyway."""
     def key(item):
-        w, s = item[1].get("weekly", 0), item[1].get("session", 0)
-        return (min(w, s) <= EXHAUSTED, -w, -s)
+        w, s = headroom(item[1])
+        return (min(w, s) <= EXHAUSTED, not item[1].get("restricted"), -w, -s)
     return [i for i, _ in sorted(accounts.items(), key=key)]
 
 
@@ -87,6 +97,11 @@ def main():
     names = dict(db.execute("select id, name from provider_connections where provider='codex' and is_active=1"))
     current = dict(db.execute("select id, priority from provider_connections where provider='codex' and is_active=1"))
     accounts = {i: {} for i in names}
+    for cid, psd in db.execute("select id, provider_specific_data from provider_connections where provider='codex' and is_active=1"):
+        try:
+            accounts[cid]["restricted"] = bool((json.loads(psd or "{}") or {}).get("excludedModels"))
+        except (ValueError, AttributeError):
+            pass
     for cid, window, pct, reset in db.execute(
         """select q.connection_id, q.window_key, q.remaining_percentage, q.next_reset_at from quota_snapshots q
            join (select connection_id, window_key, max(created_at) m from quota_snapshots where provider='codex' group by 1,2) l
@@ -113,13 +128,13 @@ def main():
     local = sum(u["busy_seconds"] for u in usage if u["model"].startswith("Qwen3.8-27B"))
     underused = [f"local Qwen busy {local * 100 // 86400}% of the last 24h"] if local < 0.5 * 86400 else []
     underused += [f"codex account {names[c]} has {a.get('weekly')}% weekly quota left"
-                  for c, a in accounts.items() if (a.get("weekly") or 0) >= 40]
+                  for c, a in accounts.items() if headroom(a)[0] >= 40]
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     REPORT.write_text(json.dumps({
         "at": datetime.now(timezone.utc).isoformat(),
         "codex_accounts": {names[c]: {**a, "priority": wanted[c]} for c, a in accounts.items()},
         "usage_24h": usage, "underutilized": underused,
-        "all_codex_exhausted": all(min(a.get("weekly", 0), a.get("session", 0)) <= EXHAUSTED for a in accounts.values()),
+        "all_codex_exhausted": all(min(headroom(a)) <= EXHAUSTED for a in accounts.values()),
     }, indent=1))
     now = datetime.now(timezone.utc)
     lifted = release_codex_hold(json.loads(SIDECAR.read_text())["models"].get("omniroute-codex", {}),

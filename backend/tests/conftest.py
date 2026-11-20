@@ -22,6 +22,7 @@ os.environ["RUNNER_FIXTURES"] = "1"
 # ancestry bound); test_team_split.py covers plans splitting into child tasks.
 os.environ["TEAM_SPLIT_MIN_WORKERS"] = "99"
 os.environ["INTAKE_LOG"] = "/nonexistent/omc-intake.log"  # host scripts never log into, or read, the live intake log
+os.environ["CAMOUFOX_DATA_DIR"] = "/nonexistent/camoufox-mcp"  # the intake never stops the host's browser daemons
 # Host scripts resolve state, logs, locks and fleet config under OMC_DATA: tests never touch the host's.
 os.environ["OMC_DATA"] = tempfile.mkdtemp(prefix="omc-test-data-")
 PRIVATE_BOARD = "00000000-0000-4000-8000-00000000b0a7"  # the one private (local-models-only) test board

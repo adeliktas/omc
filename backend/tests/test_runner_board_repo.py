@@ -101,6 +101,42 @@ def test_pr_publication_ignores_conflicting_staging_head_but_not_dirt(monkeypatc
         assert any("published as pull request" in note for note in notes)
 
 
+def test_pr_repo_verify_only_cycle_opens_no_pr_even_when_staging_head_moved(monkeypatch, tmp_path):
+    """2026-11-04: an evidence-only cycle (reviewed == its own base) on a PR repo tried to open a
+    PR for a branch equal to main because the shared clone's HEAD had moved; gh refused, and the
+    'opening the PR failed' note kept the task in Review for good."""
+    r = load(monkeypatch, tmp_path, "board-x")
+    repo = r.REPO
+    repo.mkdir()
+    r.git(repo, "init", "-q")
+    r.git(repo, "config", "user.name", "fixture")
+    r.git(repo, "config", "user.email", "fixture@invalid")
+    (repo / "api.txt").write_text("base\n")
+    r.git(repo, "add", ".")
+    r.git(repo, "commit", "-qm", "base")
+    base = r.git(repo, "rev-parse", "HEAD")
+    (repo / "api.txt").write_text("another task's base\n")
+    r.git(repo, "commit", "-qam", "staging moved")
+    calls, notes, pushed = [], [], []
+    monkeypatch.setattr(r, "api", lambda method, path, data: calls.append((path, data)))
+    monkeypatch.setattr(r.Cycle, "open_pr", lambda self, sha: pushed.append(sha))
+    cycle = r.Cycle.__new__(r.Cycle)
+    cycle.task_id, cycle.task = "abcdef1234", {"title": "Verify X"}
+    cycle.base, cycle.cleanup, cycle.refreshes = "/fixture", [], 0
+    cycle.comment, cycle.view, cycle.budget_ready = notes.append, lambda: ({}, []), lambda: True
+    cycle._publish_locked({"id": "cycle", "version": 3, "reviewed_sha": base, "base_sha": base})
+    assert calls[-1] == ("/fixture/cycles/cycle/publication/complete", {"sha": base, "version": 4})
+    assert pushed == [] and any("NO code change" in note for note in notes)
+
+
+def test_ci_note_says_workflow_edits_ship_with_the_pr():
+    """Owner 2026-11-04: the fleet clone pushes over SSH, so workflow files go out with the PR.
+    The old note made QA fail a correct workflow edit for a missing PR-body diff."""
+    r = importlib.util.module_from_spec(importlib.util.spec_from_file_location("runner_ci_note", RUNNER))
+    r.__spec__.loader.exec_module(r)
+    assert "cannot be pushed" not in r.CI_NOTE and "pushed with the pull request" in r.CI_NOTE
+
+
 def test_rejected_push_keeps_the_commit_reachable_for_a_later_push(monkeypatch, tmp_path):
     r = load(monkeypatch, tmp_path, "board-x")
     calls, said = [], []

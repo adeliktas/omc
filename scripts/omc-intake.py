@@ -11,8 +11,8 @@ INTAKE_EVERY and never twice at once.
    three outgrew the local model's context and stalled in compaction (2026-10-28).
 2. omc-intake-evaluate.py (local Qwen, leak-scanned) writes a redacted evaluation of changed
    pages and posts, and todos.json with the open SCC Jira items only.
-3. WORK/sync.py redacts each new todo again with local Qwen, leak-scans it and opens a GitHub
-   issue (label omc-fleet); keys it already handled are skipped (its checkpoint).
+3. omc-todo-sync.py redacts each new or changed todo again with local Qwen, leak-scans it and opens
+   or updates its GitHub issue (label omc-fleet); unchanged keys are skipped (its checkpoint).
 4. omc-next-batch seeds the next [backlog] lead from those issues on its next tick.
 
 Raw content and the session's event stream stay in WORK (mode 0600). LOG gets metadata only, so a
@@ -25,6 +25,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -44,14 +45,54 @@ INTAKE_EVERY = timedelta(hours=float(os.environ.get("INTAKE_EVERY_HOURS", "12"))
 SOURCES = tuple(x for x in ("confluence", "jira", "mattermost") if INTAKE.get(f"{x}_url"))  # configured ones
 MAX_BACK = timedelta(days=21)  # owner 2026-10-28: only new items, at most about 3 weeks back
 STALL = 60 * float(os.environ.get("INTAKE_STALL_MIN", "15"))
+MAX_TOOLS = 1000  # a pull's tool calls; normal pulls use under 160 (2026-11-04: a runaway loop made 10,543)
 PI = [str(HOME / ".pi/agent/bin/pi"), "-p", "--approve", "--mode", "json", "--provider", "omniroute-api",
       "--model", os.environ.get("INTAKE_MODEL", "vllm/Qwen3.8-27B-FP8"), "--thinking", "low"]
+BROWSERS = HOME / ".local/share/camoufox-mcp"  # mcp-camoufox's default data dir, which Pi's MCP config uses
+CAMOUFOX = Path(os.environ.get("CAMOUFOX_DATA_DIR") or BROWSERS)
 
 
 def log(msg: str) -> None:
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("a") as f:
         f.write(f"{datetime.now(timezone.utc).isoformat()} {msg}\n")
+
+
+def live_browser_daemon() -> int | None:
+    """Pid of the camoufox daemon a new MCP client reaches, or None when none answers."""
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(10)
+            s.connect(str(CAMOUFOX / "daemon" / "daemon.sock"))
+            s.sendall(b"GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            reply = b"".join(iter(lambda: s.recv(65536), b""))
+        return int(json.loads(reply.split(b"\r\n\r\n", 1)[1])["pid"])
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+
+
+def reap_orphan_browsers(stamp: str, proc: Path = Path("/proc")) -> None:
+    """Stop camoufox daemons on the pull's data dir that no MCP client can reach any more.
+
+    2026-11-03: a client that could not reach the running daemon started a second one. The first kept its
+    browser on profile `default` (the logins) open, so it never idled out, and its profile lock made the
+    confluence pull fail as logged out; on 11-02 the local model had killed such a daemon by hand. Nothing
+    reaches a daemon whose address is gone, so stopping it loses nothing and frees its profiles.
+    """
+    live = live_browser_daemon()
+    uptime = float((proc / "uptime").read_text().split()[0])
+    for d in sorted(proc.glob("[0-9]*"), key=lambda d: int(d.name)):
+        try:
+            if b"camoufox_mcp.daemon" not in (d / "cmdline").read_bytes() or int(d.name) == live:
+                continue
+            env = dict(x.split(b"=", 1) for x in (d / "environ").read_bytes().split(b"\0") if b"=" in x)
+            age = uptime - int((d / "stat").read_text().rsplit(")", 1)[1].split()[19]) / os.sysconf("SC_CLK_TCK")
+            if Path(os.fsdecode(env.get(b"CAMOUFOX_DATA_DIR", b"")) or BROWSERS) != CAMOUFOX or age < 120:
+                continue  # another data dir, or just spawned and not yet published
+            os.kill(int(d.name), signal.SIGTERM)
+        except (OSError, ValueError, IndexError):
+            continue
+        log(f"intake {stamp}: stopped camoufox daemon {d.name} ({age / 3600:.0f}h old, unreachable; it held browser profiles)")
 
 
 def pulled_at(source: str) -> float:
@@ -89,11 +130,13 @@ def run(label: str, argv: list[str], timeout: float, stall: float | None = None,
         except subprocess.TimeoutExpired:
             now = time.monotonic()
         quiet, took = now - last[0], int((now - start) // 60)
-        if now - start > timeout or (stall and quiet > stall):
+        why = ("timed out" if now - start > timeout else getattr(on_line, "stop", None)
+               or ("stalled" if stall and quiet > stall else None))
+        if why:
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
             waiting = f"; waiting on {on_line.waiting}" if getattr(on_line, "waiting", None) else ""
-            log(f"{label} {'timed out' if now - start > timeout else 'stalled'} after {took}m "
+            log(f"{label} {why} after {took}m "
                 f"(no output for {int(quiet // 60)}m{waiting}); killed")
             return 124, ""
         if now - beat >= 600:
@@ -114,6 +157,8 @@ class PullProgress:
     def __init__(self, label: str, stream, raw: Path):
         self.label, self.stream, self.raw = label, stream, raw
         self.turns, self.tools, self.errors, self.started, self.waiting = 0, 0, 0, {}, "model"
+        self.gave_up = False  # the last model call failed after all of Pi's retries
+        self.stop = None  # why run() kills the pull
 
     def __call__(self, line: str) -> None:
         try:
@@ -134,15 +179,25 @@ class PullProgress:
             self.errors += event.get("isError") is True
             name = self.started.pop(event.get("toolCallId"), None) or "?"
             log(f"{self.label} tool {self.tools}: {name} {'error' if event.get('isError') is True else 'ok'}")
+            if self.tools > MAX_TOOLS:
+                self.stop = f"ran away (over {MAX_TOOLS} tool calls)"
             self.waiting = "model"
         elif kind == "turn_end":
             self.turns += 1
-            usage = (event.get("message") or {}).get("usage") or {}
+            message = event.get("message") or {}
+            usage = message.get("usage") or {}
+            # 2026-10-30: a provider refusal Pi does not retry (a switched-off connection) ended the pull unnamed.
+            error = (f"; model error: {re.sub(r'[^\w .:/()-]', '', str(message.get('errorMessage')))[:100]}"
+                     if message.get("stopReason") == "error" else "")
             log(f"{self.label} turn {self.turns}: in {usage.get('input', '?')} out {usage.get('output', '?')} "
-                f"tokens; {self.tools} tools ({self.errors} errors); raw: {self.files()}")
+                f"tokens; {self.tools} tools ({self.errors} errors); raw: {self.files()}{error}")
             self.waiting = "model"
         elif isinstance(kind, str) and kind not in self.ROUTINE and self.IDENT.match(kind):
-            log(f"{self.label} event {kind}")  # compaction, retries, agent_end: named, never silent
+            # A retry names the provider's error (2026-10-29: a 429 from a held local slot was invisible).
+            reason = re.sub(r"[^\w .:/()-]", "", str(event.get("errorMessage")))[:100] if kind == "auto_retry_start" else ""
+            if kind == "auto_retry_end":
+                self.gave_up = event.get("success") is False
+            log(f"{self.label} event {kind}{': ' + reason if reason else ''}")  # compaction, retries, agent_end: named, never silent
             self.waiting = kind.removesuffix("_start") if kind.endswith("_start") else "exit" if kind == "agent_end" else "model"
 
     def files(self) -> str:
@@ -184,25 +239,46 @@ def main() -> int:
     raw.mkdir(parents=True, exist_ok=True)
     log(f"intake {stamp} pull started since {since} (model {PI[PI.index('--model') + 1]}, stall kill {STALL // 60:.0f}m)")
     turns = tools = 0
+    silent = []  # sources whose session ended on a provider error Pi gave up retrying
     for source in SOURCES:
         prompt = (f"Read {WORK}/INSTRUCTIONS-{stamp}.md. Do step 1 for the {source} site only, then only the "
                   f"raw/{stamp}/{source}.json part of step 2, then stop. WORK = {WORK}. Work step by step, keep "
                   "replies short and never paste raw content.")
-        with (WORK / f"intake-{stamp}-{source}.log").open("w") as out:
-            progress = PullProgress(f"intake {stamp} {source}", out, raw)
-            run(f"intake {stamp} {source}", PI + [prompt], 2 * 3600, STALL, progress)
-        turns, tools = turns + progress.turns, tools + progress.tools
+        for attempt in (1, 2):
+            reap_orphan_browsers(stamp)
+            with (WORK / f"intake-{stamp}-{source}.log").open("a") as out:
+                progress = PullProgress(f"intake {stamp} {source}", out, raw)
+                rc, _ = run(f"intake {stamp} {source}", PI + [prompt], 2 * 3600, STALL, progress)
+            turns, tools = turns + progress.turns, tools + progress.tools
+            # 2026-11-04: one runaway model loop crashed Pi (rc=-6) and cost jira 12 h; a model's loop is no outage.
+            if attempt == 2 or not (rc < 0 or progress.stop):
+                break
+            log(f"intake {stamp} {source} pull {progress.stop or f'crashed (rc={rc})'}; one fresh session")
+        if progress.gave_up:
+            silent.append(source)
     counts = {}
+    blocked = sorted(p.name for p in WORK.glob("BLOCKED-*.md") if p.stat().st_mtime >= now.timestamp())
     for source in SOURCES:
+        if any(source in name.lower() for name in blocked) and (raw / f"{source}.json").exists():
+            # 2026-10-31: a logged-out site's `[]` read as a quiet day and moved pulled_at past unpulled days.
+            (raw / f"{source}.json").rename(raw / f"{source}.json.blocked")
         try:
             counts[source] = len(json.loads((raw / f"{source}.json").read_text()))
         except (OSError, ValueError, TypeError):
             pass
     missing = ""
     if len(counts) < len(SOURCES):
-        blocked = sorted(p.name for p in WORK.glob("BLOCKED-*.md") if p.stat().st_mtime >= now.timestamp())
-        missing = (f"intake {stamp} did not finish (missing or unreadable: {', '.join(x for x in SOURCES if x not in counts)}; "
-                   f"blocked: {', '.join(blocked) or 'none'})")
+        absent = [x for x in SOURCES if x not in counts]
+        if all(x in silent for x in absent):
+            # 2026-10-29: an interactive session held the local model's only OmniRoute slot, every request
+            # got a 429 and the run took the next 12 h of intake with it. A source the model stopped answering is
+            # a wait, so the run's summary must not read "did not finish" (the watchdog's failure line) either.
+            state.pop("last_try", None)
+            STATE.write_text(json.dumps(state))
+            missing = f"intake {stamp}: the local model stopped answering {', '.join(absent)}; retrying on the next tick"
+        else:
+            missing =(f"intake {stamp} did not finish (missing or unreadable: {', '.join(absent)}; "
+                       f"blocked: {', '.join(blocked) or 'none'})")
         log(missing)
         if not counts:
             return 1
@@ -213,9 +289,10 @@ def main() -> int:
     log(f"intake {stamp} pulled {json.dumps(counts)} in {turns} turns, {tools} tools; evaluation started")
     rc, ev = run(f"intake {stamp} evaluation", [sys.executable, str(HERE / "omc-intake-evaluate.py"), str(WORK), stamp], 3600)
     if rc:
-        log(f"intake {stamp} pulled, but evaluation failed rc={rc}")
+        error = re.sub(r"[^\w .:/()-]", "", (ev.strip().splitlines() or [""])[-1])[:100]  # the exception, never content
+        log(f"intake {stamp} pulled, but evaluation failed rc={rc}{': ' + error if error else ''}")
         return 1
-    rc, sync = run(f"intake {stamp} sync", [sys.executable, str(WORK / "sync.py"), "--workers", "2"], 3 * 3600)
+    rc, sync = run(f"intake {stamp} sync", [sys.executable, str(HERE / "omc-todo-sync.py"), str(WORK), "--workers", "2"], 3 * 3600)
     if not missing:  # a partial pull keeps last_ok, so the next run pulls the missing source again
         state["last_ok"] = now.isoformat()
         STATE.write_text(json.dumps(state))

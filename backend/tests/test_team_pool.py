@@ -297,6 +297,36 @@ def test_dirty_deployment_checkout_fails_safely(tmp_path):
     assert record.read_text() == ""
 
 
+def test_dirty_checkout_only_idles_the_boards_that_publish_into_it(tmp_path):
+    # 2026-10-29: a hand edit in the MC checkout idled a fleet board that publishes elsewhere.
+    clean = tmp_path / "board-repo"
+    subprocess.run(["git", "init", "-q", str(clean)], check=True)
+    subprocess.run(
+        ["git", "-C", str(clean), "-c", "user.email=f@x.invalid", "-c", "user.name=f",
+         "commit", "-q", "--allow-empty", "-m", "base"],
+        check=True,
+    )
+    repos = tmp_path / "board-repos.json"
+    repos.write_text(json.dumps({"b": str(clean)}))
+    repo, full, record = setup_pool(tmp_path, [team_task("t1")], RUNNER_BOARD_REPOS=str(repos))
+    (repo / "operator-dirt.txt").write_text("hand edit\n")
+    try:
+        p = run_pool(repo, full, 3.5)
+    finally:
+        stop_pool(p)
+    assert "start t1" in record.read_text()
+    # A fresh task and record: t1's orphaned runner may still hold its lock and write.
+    (clean / "operator-dirt.txt").write_text("hand edit\n")
+    (tmp_path / "tasks.json").write_text(json.dumps([team_task("t2")]))
+    record2 = tmp_path / "record2"
+    record2.touch()
+    try:
+        p = run_pool(repo, {**full, "RUNNER_RECORD": str(record2)}, 3.5)
+    finally:
+        stop_pool(p)
+    assert record2.read_text() == ""
+
+
 # ── Cycle.integrate gating (real runner code, stubbed API + throwaway repo) ──
 
 

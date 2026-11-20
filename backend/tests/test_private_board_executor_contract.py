@@ -885,6 +885,11 @@ const spec = {cwd: '/synthetic/source', private_dir: '/synthetic/private',
     assert(command.includes("'--tmpfs' '/synthetic/private'"), 'private result namespace not masked');
     assert(command.includes("'--tmpfs' '/synthetic/private/api-runtime'"), 'runtime namespace not masked');
     assert(command.includes("'--ro-bind' '/synthetic/private/acceptance-evidence.json'"), 'whole public evidence not reopened');
+    // --clearenv drops HOME, so Go finds no module cache unless it is named (2026-11-04: every
+    // go build/vet/test on a private board failed "neither GOMODCACHE nor GOPATH is set").
+    assert(command.includes("'--setenv' 'GOPATH' '/root/go'"), 'Go path not named');
+    assert(command.includes("'--setenv' 'GOMODCACHE' '/root/go/pkg/mod'"), 'Go module cache not named');
+    assert(command.includes("'--setenv' 'GOPROXY' 'file:///root/go/pkg/mod/cache/download'"), 'offline proxy missing');
     assert(disposed === (fault !== null), 'session cleanup wrong');
   }
   print(JSON.stringify({ok: true, function_contract_only: true}));

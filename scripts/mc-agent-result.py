@@ -76,7 +76,7 @@ _TRANSIENT = re.compile(
 # was held, and 33 drafts failed in 10 min). A short hold is its health gate: the claim
 # path skips it, and the first attempt after the window probes it again.
 LOCAL_ENGINES = ("vllm", "metis", "strata")
-_UNREACHABLE = re.compile(r"^connection error\.?$|ECONNREFUSED|connection refused", re.I)
+_UNREACHABLE = re.compile(r"^(?:connection error|request timed out)\.?$|ECONNREFUSED|connection refused", re.I)
 UNREACHABLE_HOLD = timedelta(minutes=10)
 
 

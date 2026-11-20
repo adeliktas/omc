@@ -1,176 +1,125 @@
 diff --git a/Dockerfile b/Dockerfile
-index a35f57e28..db6e0c8ce 100644
+index aca259ae85..ccc4281da5 100644
 --- a/Dockerfile
 +++ b/Dockerfile
-@@ -8,11 +8,9 @@ WORKDIR /app
+@@ -33,13 +33,12 @@ ARG NODE_DIST_URL=
  # that already have a fix published in trixie. CVEs without an upstream fix yet
  # (local-only TOCTOU, etc.) remain until the distro patches them and the image
  # is rebuilt; none are reachable from the proxy's request surface at runtime.
 -RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
 -  --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-lists,target=/var/lib/apt/lists,sharing=locked \
--  apt-get update \
-+RUN  apt-get update \
++RUN \
+   sed -i -E "s|https?://deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
+   && if [ -n "${NPM_REGISTRY}" ]; then npm config set registry "${NPM_REGISTRY}"; fi \
+   && apt-get update \
    && apt-get upgrade -y \
 -  && apt-get install -y --no-install-recommends libsecret-1-0 ca-certificates \
 +  && apt-get install -y --no-install-recommends libsecret-1-0 libsecret-1-dev pkg-config ca-certificates build-essential python3 \
    && rm -rf /var/lib/apt/lists/*
  
  # npm's *bundled* node_modules (brace-expansion, ip-address, tar, undici) are
-@@ -67,9 +65,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
+@@ -96,8 +95,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
  
  # Build tools for native module compilation
  # apt-get update needed here because base's rm -rf clears the shared cache
 -RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
 -  --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-lists,target=/var/lib/apt/lists,sharing=locked \
--  apt-get update \
-+RUN  apt-get update \
++RUN \
+   apt-get update \
    && apt-get install -y --no-install-recommends python3 make g++ \
    && rm -rf /var/lib/apt/lists/*
- 
-@@ -93,43 +89,24 @@ ENV NPM_CONFIG_LEGACY_PEER_DEPS=true
- # are reproducible.
- RUN test -f package-lock.json \
-   || (echo "package-lock.json is required for reproducible Docker builds" >&2 && exit 1)
--# `npm rebuild <pkg>` re-runs the package's own install script, so under npm 11 +
--# `--ignore-scripts` on the parent `npm ci` it depends on npm's script-allowlist
--# machinery correctly re-enabling that one package's script. Some self-hosted build
--# environments (e.g. Dokploy) hit a broken/incomplete better-sqlite3 native binding
--# from that indirection. Invoking `node-gyp rebuild` directly inside the package
--# directory bypasses npm's script-running layer entirely and is deterministic
--# regardless of npm version or ignore-scripts allowlist behavior.
--# node-gyp comes from npm's own bundled copy (deterministic, already in the image)
--# instead of `npx --yes`, which would install an arbitrary registry version
--# on-demand and run its lifecycle scripts (Sonar docker:S6505).
--#
--# tls-client-node (chatgpt-web/claude-web/grok-web/lmarena/perplexity-web TLS
--# impersonation) hits the same --ignore-scripts wall: its own postinstall.js
--# fetches a platform .so/.dylib/.dll from the bogdanfinn/tls-client GitHub
--# Releases API and is never invoked when npm ci skips lifecycle scripts. Unlike
--# better-sqlite3 above, that script never throws on failure — it only
--# `console.warn`s and exits 0 — so a rate-limited or offline build would
--# otherwise succeed silently with an empty bin/ and only fail at first request
--# in production (TlsClientUnavailableError, #7802). Run it explicitly here so
--# a broken/rate-limited fetch fails the BUILD loudly instead of shipping a
--# broken image.
+@@ -132,7 +130,7 @@ RUN test -f package-lock.json \
+ # node-gyp comes from npm's own bundled copy (deterministic, already in the image)
+ # instead of `npx --yes`, which would install an arbitrary registry version
+ # on-demand and run its lifecycle scripts (Sonar docker:S6505).
 -RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-npm-cache,target=/root/.npm \
--  npm ci --include=optional --no-audit --no-fund --legacy-peer-deps --ignore-scripts \
-+# node-gyp is invoked directly (not via `npm rebuild`) because under npm 11 +
-+# `--ignore-scripts` the rebuild path depends on npm's script-allowlist machinery
-+# and yields a broken better-sqlite3 binding on self-hosted builders.
-+# tls-client-node's postinstall only console.warns on failure, so verify its bin/
-+# is non-empty or the image ships broken and fails at first request (#7802).
-+RUN  npm ci --include=optional --no-audit --no-fund --legacy-peer-deps --ignore-scripts \
++RUN \
+   npm ci --include=optional --no-audit --no-fund --legacy-peer-deps --ignore-scripts \
    && (cd node_modules/better-sqlite3 \
-       && node /usr/local/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js rebuild) \
-   && node -e "require('better-sqlite3')(':memory:').close()" \
-   && node node_modules/tls-client-node/scripts/postinstall.js \
-   && (test -n "$(find node_modules/tls-client-node/bin -mindepth 1 -print -quit 2>/dev/null)" \
--      || (echo "tls-client-node native binary missing after postinstall — GitHub API fetch likely rate-limited or failed (#7802)" >&2 && exit 1))
--
--# Build with Turbopack (stable in Next 16, the repo default). The v3.8.27-era
--# TurbopackInternalError panic ("entered unreachable code: there must be a path to a
--# root" in ImportTracer::get_traces) no longer reproduces on Next 16.2.9 — validated
--# 2026-07-05 with clean amd64 (12min14s, image smoke-tested: /api/monitoring/health
--# 200) and arm64 (qemu, exit 0, zero panic strings) builds. Turbopack cut the bare
--# build from 17min to 9min on the same 32-core box. Webpack stays available as the
--# escape hatch: `--build-arg`/-e OMNIROUTE_USE_TURBOPACK=0.
-+      || (echo "tls-client-node native binary missing after postinstall (#7802)" >&2 && exit 1))
-+
-+# Build with webpack (stable). Turbopack hit a non-recoverable internal panic on this
-+# Next.js version during the v3.8.27 release build — TurbopackInternalError "entered
-+# unreachable code: there must be a path to a root" in ImportTracer::get_traces, on both
-+# linux/amd64 and linux/arm64. Webpack is the proven engine (build:release / VPS / CI Build
-+# all green). Re-enable Turbopack (=1) once the upstream tracer bug is fixed.
- # See docs/ops/QUALITY_GATE_PLAYBOOK.md Parte 6.
- #
- # Declared as ARG+ENV, not a bare ENV: a bare ENV shadows any same-named ARG for
-@@ -200,10 +177,7 @@ ARG OMNIROUTE_BUILD_WORKERS=3
- ENV CIRCLE_NODE_TOTAL=${OMNIROUTE_BUILD_WORKERS}
+       && if [ -n "${NODE_DIST_URL}" ]; then export NODEJS_ORG_MIRROR="${NODE_DIST_URL}"; fi \
+@@ -242,9 +240,7 @@ ARG OMNIROUTE_WEBPACK_BUILD_CACHE=""
+ ENV OMNIROUTE_WEBPACK_BUILD_CACHE=$OMNIROUTE_WEBPACK_BUILD_CACHE
  
  COPY . ./
+-# The cache mount keeps .build/next/cache across builds on the same BuildKit host.
+-# It holds only the SWC cache unless OMNIROUTE_WEBPACK_BUILD_CACHE=1.
 -RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-next-cache,target=/app/.build/next/cache \
--  mkdir -p /app/data \
--  && npm run build \
--  && node --input-type=module -e "import { createRequire } from 'node:module'; import { pathToFileURL } from 'node:url'; const standaloneRoot = '/app/.build/next/standalone/node_modules/'; const require = createRequire('/app/.build/next/standalone/package.json'); for (const pkg of ['@atjsh/llmlingua-2', '@huggingface/transformers', 'js-tiktoken']) { const resolved = require.resolve(pkg); if (!resolved.startsWith(standaloneRoot)) throw new Error(pkg + ' resolved outside standalone: ' + resolved); await import(pathToFileURL(resolved).href); } const onnxRuntime = require.resolve('onnxruntime-node'); if (!onnxRuntime.startsWith(standaloneRoot)) throw new Error('onnxruntime-node resolved outside standalone: ' + onnxRuntime); await import(pathToFileURL(onnxRuntime).href);"
-+RUN  mkdir -p /app/data && npm run build
++RUN \
+   mkdir -p /app/data \
+   && npm run build \
+   && node --input-type=module -e "import { createRequire } from 'node:module'; import { pathToFileURL } from 'node:url'; const standaloneRoot = '/app/.build/next/standalone/node_modules/'; const require = createRequire('/app/.build/next/standalone/package.json'); for (const pkg of ['@atjsh/llmlingua-2', '@huggingface/transformers', 'js-tiktoken']) { const resolved = require.resolve(pkg); if (!resolved.startsWith(standaloneRoot)) throw new Error(pkg + ' resolved outside standalone: ' + resolved); await import(pathToFileURL(resolved).href); } const onnxRuntime = require.resolve('onnxruntime-node'); if (!onnxRuntime.startsWith(standaloneRoot)) throw new Error('onnxruntime-node resolved outside standalone: ' + onnxRuntime); await import(pathToFileURL(onnxRuntime).href);"
+@@ -319,12 +315,14 @@ COPY --chown=node:node --from=builder /app/LICENSE ./LICENSE
  
- # ── Runner base ────────────────────────────────────────────────────────────
- FROM base AS runner-base
-@@ -260,11 +234,13 @@ EXPOSE 20128
+ EXPOSE 20128
  
++# Warns if the mounted data volume has wrong ownership. chmod is its own step
++# (still root): COPY's chmod flag needs BuildKit and we build with the legacy builder.
++COPY scripts/check-permissions.sh /app/check-permissions.sh
++RUN chmod 755 /app/check-permissions.sh
++
  # Drop to non-root before ENTRYPOINT/CMD so every derived stage (runner-cli,
  # runner-web) also runs as a non-root user unless they explicitly switch back.
--USER node
+ USER node
 -
- # Warns if the mounted data volume has wrong ownership
+-# Warns if the mounted data volume has wrong ownership
 -COPY --chmod=755 scripts/check-permissions.sh /app/check-permissions.sh
--ENTRYPOINT ["/app/check-permissions.sh"]
-+COPY scripts/check-permissions.sh /tmp/check-permissions.sh
-+RUN chmod 755 /tmp/check-permissions.sh
-+# Drop to non-root AFTER the root-owned chmod above (legacy-docker: --chmod on
-+# COPY needs BuildKit which is unavailable here, so chmod runs as a step).
-+USER node
-+ENTRYPOINT ["/tmp/check-permissions.sh"]
+ ENTRYPOINT ["/app/check-permissions.sh"]
  
  HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-   CMD ["node", "healthcheck.mjs"]
-@@ -304,9 +280,7 @@ COPY --from=builder /app/node_modules/playwright ./node_modules/playwright
+@@ -367,8 +365,7 @@ COPY --from=builder /app/node_modules/playwright ./node_modules/playwright
  # browsers land under /home/node which persists across image layers and is
  # accessible to the non-root runtime user.
  ENV PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright
 -RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
 -  --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-lists,target=/var/lib/apt/lists,sharing=locked \
--  apt-get update \
-+RUN  apt-get update \
++RUN \
+   apt-get update \
    && node node_modules/playwright/cli.js install chromium --with-deps \
-   && chown -R node:node /home/node/.cache \
-   && rm -rf /var/lib/apt/lists/*
-@@ -326,15 +300,12 @@ COPY --from=builder /app/node_modules/playwright-core ./node_modules/playwright-
+   && apt-get install -y --no-install-recommends xvfb \
+@@ -394,8 +391,7 @@ COPY --from=builder /app/node_modules/playwright-core ./node_modules/playwright-
  COPY --from=builder /app/node_modules/playwright ./node_modules/playwright
  
  # Install system dependencies required by openclaw (git+ssh references).
 -RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
 -  --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-lists,target=/var/lib/apt/lists,sharing=locked \
--  apt-get update \
-+RUN  apt-get update \
-   && apt-get install -y --no-install-recommends git ca-certificates docker.io docker-compose \
++RUN \
+   apt-get update \
+   && apt-get install -y --no-install-recommends git ca-certificates \
    && rm -rf /var/lib/apt/lists/* \
-   && git config --system url."https://github.com/".insteadOf "ssh://git@github.com/"
- 
- # Install CLI tools globally. Separate layer from apt for better cache reuse.
+@@ -414,7 +410,7 @@ RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,targe
+ # `cli_not_found` handling is correct but every PAT login fails with
+ # `spawn qodercli ENOENT`. Same pinning rationale as the tools above.
+ # npm 12 requires an explicit allowlist for required global lifecycle scripts.
 -RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-npm-cache,target=/root/.npm \
--  npm install -g --no-audit --no-fund @openai/codex @anthropic-ai/claude-code droid openclaw@latest
-+RUN  npm install -g --no-audit --no-fund @openai/codex @anthropic-ai/claude-code droid openclaw@latest
++RUN \
+   npm install -g --no-audit --no-fund --allow-scripts=@anthropic-ai/claude-code,@qoder-ai/qodercli,droid,openclaw,sharp,@google/genai,tree-sitter-bash,protobufjs \
+     @openai/codex@0.165.0 \
+     @anthropic-ai/claude-code@2.1.260 \
+@@ -424,7 +420,7 @@ RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-npm-cache,targe
  
  USER node
-diff --git a/open-sse/handlers/chatCore.ts b/open-sse/handlers/chatCore.ts
-index 3c240717a..5b4abfee2 100644
---- a/open-sse/handlers/chatCore.ts
-+++ b/open-sse/handlers/chatCore.ts
-@@ -3237,7 +3237,7 @@ export async function handleChatCore({
-                 const nextCreds = await getProviderCredentials(
-                   "codex",
-                   null,
--                  null,
-+                  apiKeyInfo?.allowedConnections ?? null,
-                   modelToCall || model || requestedModel || null,
-                   {
-                     excludeConnectionIds: [...codexExcludedIds],
-@@ -3319,7 +3319,7 @@ export async function handleChatCore({
-                   const byopNextCreds = await getProviderCredentials(
-                     "antigravity",
-                     null,
--                    null,
-+                    apiKeyInfo?.allowedConnections ?? null,
-                     modelToCall || model || requestedModel || null,
-                     { excludeConnectionIds: [...antigravityByopExcludedIds] }
-                   ).catch(() => null);
+ 
+-RUN --network=none codex --version \
++RUN codex --version \
+   && claude --version \
+   && droid --version \
+   && openclaw --version \
+@@ -443,8 +439,7 @@ FROM runner-cli-core AS runner-cli
+ 
+ USER root
+ 
+-RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,target=/var/cache/apt,sharing=locked \
+-  --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-lists,target=/var/lib/apt/lists,sharing=locked \
++RUN \
+   apt-get update \
+   && apt-get install -y --no-install-recommends docker.io docker-compose \
+   && rm -rf /var/lib/apt/lists/*
 diff --git a/open-sse/handlers/privateLaneChat.ts b/open-sse/handlers/privateLaneChat.ts
 new file mode 100644
-index 000000000..0b25f0a1c
+index 0000000000..6c9307b8bd
 --- /dev/null
 +++ b/open-sse/handlers/privateLaneChat.ts
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,237 @@
 +import http from "node:http";
 +import { z } from "zod";
 +import { enforceApiKeyPolicy } from "@/shared/utils/apiKeyPolicy";
@@ -338,7 +287,10 @@ index 000000000..0b25f0a1c
 +      return refuse(403);
 +    if (request.signal.aborted) return refuse(503);
 +    if (request.method === "GET")
-+      return Response.json({ admitted: true, model: PRIVATE_LANE_TARGET, source_method: "GET" }, { headers });
++      return Response.json(
++        { admitted: true, model: PRIVATE_LANE_TARGET, source_method: "GET" },
++        { headers }
++      );
 +    if (busy) return refuse(503);
 +    busy = true;
 +    try {
@@ -405,81 +357,11 @@ index 000000000..0b25f0a1c
 +    return refuse(503);
 +  }
 +}
-diff --git a/open-sse/services/autoCombo/scoring.ts b/open-sse/services/autoCombo/scoring.ts
-index 4c939501c..b22ff2eca 100644
---- a/open-sse/services/autoCombo/scoring.ts
-+++ b/open-sse/services/autoCombo/scoring.ts
-@@ -259,7 +259,7 @@ export function calculateFactors(
-   candidate: ProviderCandidate,
-   pool: ProviderCandidate[],
-   taskType: string,
--  getTaskFitness: (model: string, taskType: string) => number,
-+  getTaskFitness: (model: string, taskType: string, provider?: string) => number,
-   manifestHint?: RoutingHint | null,
-   precomputedMaxima?: PoolMaxima
- ): ScoringFactors {
-@@ -279,7 +279,7 @@ export function calculateFactors(
-           : 0.0,
-     costInv: clamp01(1 - candidate.costPer1MTokens / maxCost),
-     latencyInv: clamp01(1 - candidate.p95LatencyMs / maxLatency),
--    taskFit: clamp01(getTaskFitness(candidate.model, taskType)),
-+    taskFit: clamp01(getTaskFitness(candidate.model, taskType, candidate.provider)),
-     stability: clamp01(1 - candidate.latencyStdDev / maxStdDev),
-     tierPriority: calculateTierScore(candidate.accountTier, candidate.quotaResetIntervalSecs),
-     tierAffinity: calculateTierAffinity(candidate, manifestHint),
-@@ -299,7 +299,7 @@ export function scorePool(
-   pool: ProviderCandidate[],
-   taskType: string,
-   weights: ScoringWeights = DEFAULT_WEIGHTS,
--  getTaskFitness: (model: string, taskType: string) => number = () => 0.5,
-+  getTaskFitness: (model: string, taskType: string, provider?: string) => number = () => 0.5,
-   manifestHint?: RoutingHint | null
- ): ScoredProvider[] {
-   const poolMaxima = computePoolMaxima(pool);
-diff --git a/open-sse/services/autoCombo/taskFitness.ts b/open-sse/services/autoCombo/taskFitness.ts
-index 6489583ae..1fe7c6db2 100644
---- a/open-sse/services/autoCombo/taskFitness.ts
-+++ b/open-sse/services/autoCombo/taskFitness.ts
-@@ -337,13 +337,14 @@ function lookupWildcardBoosts(normalizedModel: string, normalizedTask: string):
-   return Math.min(1.0, baseScore);
- }
- 
--export function getTaskFitness(model: string, taskType: string): number {
--  return getTaskFitnessWithSource(model, taskType).score;
-+export function getTaskFitness(model: string, taskType: string, provider?: string): number {
-+  return getTaskFitnessWithSource(model, taskType, provider).score;
- }
- 
- export function getTaskFitnessWithSource(
-   model: string,
--  taskType: string
-+  taskType: string,
-+  provider?: string
- ): { score: number; source: string } {
-   const normalizedModel = model.toLowerCase();
-   const normalizedTask = taskType.toLowerCase();
-@@ -379,6 +380,16 @@ export function getTaskFitnessWithSource(
-     return { score: staticScore, source: "fitness_table" };
-   }
- 
-+  // Compatible Claude CLI bridges use bare family names; Codex strips its
-+  // provider prefix before scoring. Keep exact user/arena/tier data above first.
-+  const family = /^(sonnet|opus|haiku)(?:-|$)/.exec(normalizedModel)?.[1];
-+  const alias = family
-+    ? `claude-${normalizedModel}`
-+    : provider === "codex"
-+      ? `codex/${normalizedModel}`
-+      : null;
-+  const aliasScore = alias ? lookupStaticFitnessTable(alias, normalizedTask) : null;
-+  if (aliasScore !== null) return { score: aliasScore, source: "fitness_table_alias" };
-   return { score: lookupWildcardBoosts(normalizedModel, normalizedTask), source: "wildcard_boost" };
- }
- 
 diff --git a/open-sse/services/combo/autoStrategy.ts b/open-sse/services/combo/autoStrategy.ts
-index 78964c4c7..48f3e931e 100644
+index d5b7d9eedd..43242d6fb0 100644
 --- a/open-sse/services/combo/autoStrategy.ts
 +++ b/open-sse/services/combo/autoStrategy.ts
-@@ -178,6 +178,7 @@ export function mapIntentToTaskType(intent: string): "coding" | "analysis" | "de
+@@ -206,6 +206,7 @@ export function mapIntentToTaskType(intent: string): "coding" | "analysis" | "de
    switch (intent) {
      case "code":
        return "coding";
@@ -489,7 +371,7 @@ index 78964c4c7..48f3e931e 100644
      case "simple":
 diff --git a/open-sse/services/combo/promptAwareRouting.ts b/open-sse/services/combo/promptAwareRouting.ts
 new file mode 100644
-index 000000000..0262daf33
+index 0000000000..0262daf33a
 --- /dev/null
 +++ b/open-sse/services/combo/promptAwareRouting.ts
 @@ -0,0 +1,91 @@
@@ -585,35 +467,44 @@ index 000000000..0262daf33
 +  return { targets: fallback, reason: "round-robin: scoring unavailable" };
 +}
 diff --git a/open-sse/services/combo/resolveAutoStrategy.ts b/open-sse/services/combo/resolveAutoStrategy.ts
-index 45ef4b5c6..10a75d5c6 100644
+index 00bb4da488..ce30c4ebb5 100644
 --- a/open-sse/services/combo/resolveAutoStrategy.ts
 +++ b/open-sse/services/combo/resolveAutoStrategy.ts
-@@ -20,11 +20,14 @@ import { parseModel } from "../model.ts";
- import { supportsToolCalling } from "../modelCapabilities.ts";
+@@ -22,15 +22,17 @@ import { supportsToolCalling } from "../modelCapabilities.ts";
  import type { ResilienceSettings } from "../../../src/lib/resilience/settings";
  import { parseAutoConfig } from "./autoConfig.ts";
+ import { isComboEmptyPoolNoEligibleTargetsEnabled } from "./protectedPriorityStopStatus.ts";
 -import { dedupeTargetsByExecutionKey } from "./comboData.ts";
 +import { dedupeTargetsByExecutionKey, isRecord } from "./comboData.ts";
+ import { restoreIncomingOrder } from "./rungOrder.ts";
  import {
    getModelContextLimitForModelString,
    providerSupportsEmulatedToolCalling,
-+  filterTargetsByRequestCompatibility,
+   filterTargetsByRequestCompatibility,
+   deriveRequestCompatibilityRequirements,
 +  describeCapabilityFilterExhaustion,
  } from "./comboStructure.ts";
+ import { hasMediaRequirements } from "./mediaCompatibility.ts";
 +import { orderPromptAwareTargets } from "./promptAwareRouting.ts";
  import {
    calculatePromptCacheAffinityScores,
    promptCacheTargetIdentity,
-@@ -297,6 +300,62 @@ export async function resolveAutoStrategyOrder(
-       ),
-     };
-   }
+@@ -497,6 +499,66 @@ export async function resolveAutoStrategyOrder(
+   );
+   // G2: Register candidates so chatCore can mark quotaSoftPenalty via setCandidateQuotaSoftPenalty.
+   _registerExecutionCandidates(routableCandidates);
 +  const autoSettings =
 +    combo.autoConfig || (isRecord(combo.config?.auto) ? combo.config.auto : combo.config) || {};
 +  if (autoSettings.promptAwareRouting === true) {
 +    // Reuse the hard compatibility gate before choosing, not just after it.
 +    // The normal pipeline still repeats admission and native-turn pin checks.
-+    const compatible = filterTargetsByRequestCompatibility(eligibleTargets, body, log);
++    const compatible = filterTargetsByRequestCompatibility(eligibleTargets, body, log, undefined, {
++      failOpen: compatFilterFailOpen,
++      outputLimitAdvisory:
++        config?.outputLimitAdvisory === true ||
++        (settings as { outputLimitAdvisory?: unknown } | null | undefined)?.outputLimitAdvisory ===
++          true,
++    });
 +    if (!compatible.length) {
 +      const exhaustion = describeCapabilityFilterExhaustion(eligibleTargets, body, combo.name);
 +      if (exhaustion)
@@ -632,14 +523,6 @@ index 45ef4b5c6..10a75d5c6 100644
 +          ),
 +        };
 +    }
-+    const manifestHint =
-+      config.complexityAwareRouting === true || autoSettings.complexityAwareRouting === true
-+        ? buildComplexityRoutingHint(
-+            compatible.filter((t) => t.kind === "model"),
-+            body,
-+            log
-+          )
-+        : null;
 +    try {
 +      const decision = orderPromptAwareTargets({
 +        comboName: combo.name,
@@ -649,15 +532,21 @@ index 45ef4b5c6..10a75d5c6 100644
 +        intent,
 +        intentEnabled: intentConfig.enabled,
 +        weights,
-+        manifestHint,
++        manifestHint: autoManifestHint,
 +        budgetCap,
 +        budgetFallback,
 +      });
++      // Account-preference tiers and soft status penalties still outrank intent.
++      const tiered = orderAccountPreferences(decision.targets, accountPreferences);
++      const promptTargets = [
++        ...tiered.filter((target) => !penalisedKeys.has(target.executionKey)),
++        ...tiered.filter((target) => penalisedKeys.has(target.executionKey)),
++      ];
 +      log.info(
 +        "COMBO",
-+        `Auto selection: ${decision.targets[0]?.modelStr || "none"} | ${decision.reason}`
++        `Auto selection: ${promptTargets[0]?.modelStr || "none"} | ${decision.reason}`
 +      );
-+      return { orderedTargets: decision.targets, autoUsedExplicitRouter: true };
++      return { orderedTargets: promptTargets, autoUsedExplicitRouter: true };
 +    } catch (err) {
 +      if (err instanceof BudgetExceededError)
 +        return { earlyResponse: errorResponse(402, err.message) };
@@ -667,17 +556,34 @@ index 45ef4b5c6..10a75d5c6 100644
    if (routableCandidates.length > 0) {
      let selectedProvider: string | null = null;
      let selectedModel: string | null = null;
-@@ -372,7 +431,7 @@ export async function resolveAutoStrategyOrder(
-     // difficulty and feed a tier hint into scoring so tierAffinity /
-     // specificityMatch favor candidates whose tier matches the request.
-     const autoManifestHint: RoutingHint | null =
--      config.complexityAwareRouting === true
-+      config.complexityAwareRouting === true || autoSettings.complexityAwareRouting === true
-         ? buildComplexityRoutingHint(
-             eligibleTargets.filter((t) => t.kind === "model"),
-             body,
+diff --git a/open-sse/services/combo/roundRobinCombo.ts b/open-sse/services/combo/roundRobinCombo.ts
+index 2768840c7e..c39e740745 100644
+--- a/open-sse/services/combo/roundRobinCombo.ts
++++ b/open-sse/services/combo/roundRobinCombo.ts
+@@ -36,6 +36,7 @@ import {
+ } from "../comboConfig.ts";
+ import { getHiddenModelsByProvider } from "@/models";
+ import * as semaphore from "../rateLimitSemaphore.ts";
++import { releaseWhenResponseComplete } from "../../utils/responseLifetime.ts";
+ import { getCircuitBreaker } from "../../../src/shared/utils/circuitBreaker";
+ import { parseModel } from "../model.ts";
+ import {
+@@ -1082,8 +1083,12 @@ export async function handleRoundRobinCombo({
+                 tag: "COMBO-RR",
+               });
+             }
++            // A successful stream still occupies its slot after headers return:
++            // hand the release to the body so the finally below cannot free it early.
++            const held = releaseWhenResponseComplete(result, release);
++            release = () => {};
+             // Clone is consumed by quality check; original stays unlocked.
+-            return result;
++            return held;
+           }
+ 
+           // Extract error info
 diff --git a/open-sse/services/intentClassifier.ts b/open-sse/services/intentClassifier.ts
-index 0ed15f96d..f79c7ffeb 100644
+index 96c3edae96..6b59aae0a5 100644
 --- a/open-sse/services/intentClassifier.ts
 +++ b/open-sse/services/intentClassifier.ts
 @@ -39,7 +39,6 @@ export const CODE_KEYWORDS: readonly string[] = [
@@ -698,86 +604,105 @@ index 0ed15f96d..f79c7ffeb 100644
    "repositório",
    "configurar",
    "instalar",
-@@ -587,6 +584,15 @@ export const SIMPLE_KEYWORDS: readonly string[] = [
-   "ملخص",
- ];
+diff --git a/open-sse/services/refreshSerializer.ts b/open-sse/services/refreshSerializer.ts
+index d9ec046846..7165e544b8 100644
+--- a/open-sse/services/refreshSerializer.ts
++++ b/open-sse/services/refreshSerializer.ts
+@@ -77,7 +77,10 @@ const groupTail = new Map<string, Promise<void>>();
+ // `executor.refreshCredentials()`, and the Codex/Claude executors call
+ // `getAccessToken()`, which serializes again on the same group. Without this the
+ // inner call queues behind its own caller until the lane bound fires.
+-const heldGroups = new AsyncLocalStorage<ReadonlySet<string>>();
++// A lease goes inactive when its lane is released: async work the refresh spawned
++// but did not await inherits the store and must queue again, not bypass the lane.
++type LaneLease = { group: string; active: boolean };
++const heldGroups = new AsyncLocalStorage<readonly LaneLease[]>();
  
-+function matchesKeyword(text: string, keyword: string): boolean {
-+  const lower = keyword.toLowerCase();
-+  // CJK keywords may be parts of unsegmented words; Latin short keywords must
-+  // not match "def" in "define" or "const" in "constellation".
-+  if (/[^\p{Script=Latin}\p{N}\s_]/u.test(lower)) return text.includes(lower);
-+  const escaped = lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-+  return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "u").test(text);
-+}
-+
- /**
-  * Classify a prompt's intent using multilingual keyword matching.
-  * Priority: code > math > reasoning > creative > simple > medium (default)
-@@ -596,7 +602,7 @@ export function classifyPromptIntent(prompt: string, systemPrompt?: string): Int
-   const wordCount = prompt.trim().split(/\s+/).length;
+ // #14970: upper bound on how long one refresh may hold the group lane. Not
+ // every provider's refresh fetch carries an AbortSignal, so one hung upstream
+@@ -119,7 +122,7 @@ export async function serializeRefresh<T>(
+   // Reentrant: this call chain already holds the group's lane, so the network
+   // refresh still runs at concurrency=1 for the group. Queueing would deadlock.
+   const held = heldGroups.getStore();
+-  if (held?.has(group)) return fn();
++  if (held?.some((lease) => lease.group === group && lease.active)) return fn();
  
-   for (const kw of CODE_KEYWORDS) {
--    if (fullText.includes(kw.toLowerCase())) return "code";
-+    if (matchesKeyword(fullText, kw)) return "code";
-   }
-   for (const kw of MATH_KEYWORDS) {
-     if (fullText.includes(kw.toLowerCase())) return "math";
-@@ -645,7 +651,7 @@ export function classifyWithConfig(
-   const creativeKws = [...CREATIVE_KEYWORDS, ...(config.extraCreativeKeywords ?? [])];
-   const simpleKws = [...SIMPLE_KEYWORDS, ...(config.extraSimpleKeywords ?? [])];
-   for (const kw of codeKws) {
--    if (fullText.includes(kw.toLowerCase())) return "code";
-+    if (matchesKeyword(fullText, kw)) return "code";
-   }
-   for (const kw of mathKws) {
-     if (fullText.includes(kw.toLowerCase())) return "math";
-diff --git a/package-lock.json b/package-lock.json
-index 10f668c47..afd61631c 100644
---- a/package-lock.json
-+++ b/package-lock.json
-@@ -25588,17 +25588,6 @@
-         "node": ">= 14"
-       }
-     },
--    "node_modules/libxmljs2/node_modules/brace-expansion": {
--      "version": "2.1.4",
--      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-2.1.4.tgz",
--      "integrity": "sha512-hGfVzPxthbf3+2yjg/RBs60cB0FhqBS/zvdV/4wn4/BmN0bNMMHPc4V/BbFieqf1TKAGGAHnY4eSjajCl0f2Xg==",
--      "dev": true,
--      "license": "MIT",
--      "optional": true,
--      "dependencies": {
--        "balanced-match": "^1.0.0"
--      }
--    },
-     "node_modules/libxmljs2/node_modules/cacache": {
-       "version": "19.0.1",
-       "resolved": "https://registry.npmjs.org/cacache/-/cacache-19.0.1.tgz",
-@@ -25722,6 +25711,18 @@
-         "url": "https://github.com/sponsors/isaacs"
-       }
-     },
-+    "node_modules/libxmljs2/node_modules/minimatch/node_modules/brace-expansion": {
-+      "version": "1.1.21",
-+      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-1.1.21.tgz",
-+      "integrity": "sha512-9zeA+KLZNNzglF2TPKRQEDyx6Yby7daAkuy8MiPzpXPsYDWi/DRM8jmwUDxokQjYqBpv5DgPiwD4h4ZZSy1Ujw==",
-+      "dev": true,
-+      "license": "MIT",
-+      "optional": true,
-+      "dependencies": {
-+        "balanced-match": "^1.0.0",
-+        "concat-map": "0.0.1"
+   const prevTail = groupTail.get(group) ?? Promise.resolve();
+   let releaseMine!: () => void;
+@@ -137,9 +140,10 @@ export async function serializeRefresh<T>(
+   // forever on an unresponsive upstream. Promise.race keeps fn()'s late
+   // rejection handled while the lane releases for queued siblings.
+   let laneTimer: ReturnType<typeof setTimeout> | null = null;
++  const lease: LaneLease = { group, active: true };
+   try {
+     return (await Promise.race([
+-      heldGroups.run(new Set([...(held ?? []), group]), fn),
++      heldGroups.run([...(held ?? []), lease], fn),
+       new Promise<null>((resolve) => {
+         laneTimer = setTimeout(() => {
+           log?.error?.(
+@@ -152,6 +156,7 @@ export async function serializeRefresh<T>(
+       }),
+     ])) as T;
+   } finally {
++    lease.active = false;
+     if (laneTimer) clearTimeout(laneTimer);
+     // Only pay the settle gap when a sibling is already queued behind us — a
+     // lone refresh has nobody to collide with, so it must be released
+diff --git a/open-sse/utils/responseLifetime.ts b/open-sse/utils/responseLifetime.ts
+new file mode 100644
+index 0000000000..92dffeb5e1
+--- /dev/null
++++ b/open-sse/utils/responseLifetime.ts
+@@ -0,0 +1,43 @@
++/** Keep a streaming request's capacity slot until EOF, error or cancellation. */
++export function releaseWhenResponseComplete(response: Response, release: () => void): Response {
++  if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
++    release();
++    return response;
++  }
++  const reader = response.body.getReader();
++  let released = false;
++  const finish = () => {
++    if (!released) {
++      released = true;
++      release();
++    }
++  };
++  const body = new ReadableStream<Uint8Array>({
++    async pull(controller) {
++      try {
++        const { done, value } = await reader.read();
++        if (done) {
++          finish();
++          controller.close();
++        } else {
++          controller.enqueue(value);
++        }
++      } catch (error) {
++        finish();
++        controller.error(error);
 +      }
 +    },
-     "node_modules/libxmljs2/node_modules/minipass-fetch": {
-       "version": "4.0.1",
-       "resolved": "https://registry.npmjs.org/minipass-fetch/-/minipass-fetch-4.0.1.tgz",
++    async cancel(reason) {
++      try {
++        await reader.cancel(reason);
++      } finally {
++        finish();
++      }
++    },
++  });
++  return new Response(body, {
++    status: response.status,
++    statusText: response.statusText,
++    headers: response.headers,
++  });
++}
 diff --git a/src/app/(dashboard)/dashboard/settings/components/ModelCapabilityOverridesTab.tsx b/src/app/(dashboard)/dashboard/settings/components/ModelCapabilityOverridesTab.tsx
-index e0b0ee66a..ca04ff80a 100644
+index 5ccdff0dc5..22a9c9d928 100644
 --- a/src/app/(dashboard)/dashboard/settings/components/ModelCapabilityOverridesTab.tsx
 +++ b/src/app/(dashboard)/dashboard/settings/components/ModelCapabilityOverridesTab.tsx
-@@ -10,8 +10,12 @@ import {
+@@ -12,8 +12,12 @@ import {
  } from "@/lib/modelCapabilityOverrideTargets";
  
  type ModelOverrideKey =
@@ -792,8 +717,8 @@ index e0b0ee66a..ca04ff80a 100644
  type StatusTone = "success" | "error" | "info";
  
  type ModelOverrideTarget = import("@/lib/modelCapabilityOverrideTargets").ModelOverrideTarget;
-@@ -72,7 +76,7 @@ function useModelCapabilityOverridesData() {
-   }, [showStatus, t]);
+@@ -48,7 +52,7 @@ function useModelCapabilityOverridesData() {
+   }, []);
  
    const saveOverride = useCallback(
 -    async (target: string, key: ModelOverrideKey, value: number | string) => {
@@ -801,7 +726,7 @@ index e0b0ee66a..ca04ff80a 100644
        try {
          const response = await fetch("/api/model-capability-overrides", {
            method: "PATCH",
-@@ -152,7 +156,7 @@ function ModelCapabilityOverridesPanel({
+@@ -155,7 +159,7 @@ function ModelCapabilityOverridesPanel({
  }: {
    targets: ModelOverrideTarget[];
    overrides: ModelCapabilityOverride[];
@@ -810,7 +735,7 @@ index e0b0ee66a..ca04ff80a 100644
    onRemove: (target: string, key: ModelOverrideKey) => void;
  }) {
    const [selectedTarget, setSelectedTarget] = useState("");
-@@ -296,7 +300,7 @@ function ModelOverrideEditor({
+@@ -294,7 +298,7 @@ function ModelOverrideEditor({
    activeOverrides: ModelCapabilityOverride[];
    activeTarget: string;
    onRemove: (target: string, key: ModelOverrideKey) => void;
@@ -819,7 +744,7 @@ index e0b0ee66a..ca04ff80a 100644
  }) {
    const t = useTranslations("settings");
    return (
-@@ -307,6 +311,17 @@ function ModelOverrideEditor({
+@@ -305,6 +309,17 @@ function ModelOverrideEditor({
          </p>
          <p className="text-xs font-mono break-all">{activeTarget || t("none")}</p>
        </div>
@@ -837,7 +762,7 @@ index e0b0ee66a..ca04ff80a 100644
        <ModelOverrideForm activeTarget={activeTarget} onSave={onSave} />
        <ModelOverrideRows activeOverrides={activeOverrides} onRemove={onRemove} />
      </div>
-@@ -411,7 +426,7 @@ function ModelOverrideRow({
+@@ -415,7 +430,7 @@ function ModelOverrideRow({
        <div className="flex items-center gap-2 min-w-0">
          <span className="font-mono px-1.5 py-0.5 rounded bg-bg-subtle">{override.key}</span>
          <span className="font-semibold tabular-nums">
@@ -845,9 +770,9 @@ index e0b0ee66a..ca04ff80a 100644
 +          {Array.isArray(override.value) ? override.value.join(", ") : String(override.value)}
          </span>
        </div>
-       <button
+       <Button
 diff --git a/src/app/api/model-capability-overrides/route.ts b/src/app/api/model-capability-overrides/route.ts
-index 2b03ef8a3..700effccf 100644
+index 2b03ef8a3a..700effccff 100644
 --- a/src/app/api/model-capability-overrides/route.ts
 +++ b/src/app/api/model-capability-overrides/route.ts
 @@ -21,6 +21,7 @@ const overrideKeySchema = z.enum([
@@ -904,9 +829,52 @@ index 2b03ef8a3..700effccf 100644
  
    const { entries, nodeToPrefix, prefixToNode, eligibleNodeIds, compatibleNodeIds } =
      await loadPrefixMaps();
+diff --git a/src/app/api/oauth/codex/import/route.ts b/src/app/api/oauth/codex/import/route.ts
+index f71e5e97f2..8527ff7bb2 100644
+--- a/src/app/api/oauth/codex/import/route.ts
++++ b/src/app/api/oauth/codex/import/route.ts
+@@ -44,10 +44,9 @@ const MIN_USABLE_ACCESS_TOKEN_LIFETIME_SECONDS = 60;
+  * and `"inconclusive"` when the check could not decide, e.g. a transient
+  * network error. The caller decides what each outcome means for the record.
+  */
+-async function validateCodexRefreshToken(payload: {
+-  accessToken: string;
+-  refreshToken: string;
+-}): Promise<RefreshValidation> {
++async function validateCodexRefreshToken(
++  payload: Pick<CodexImportPayload, "accessToken" | "refreshToken" | "expiresAt" | "tokenExpiresAt">
++): Promise<RefreshValidation> {
+   let refreshResult: unknown;
+   try {
+     refreshResult = await refreshCodexToken(payload.refreshToken, undefined, null);
+@@ -65,8 +64,23 @@ async function validateCodexRefreshToken(payload: {
+     typeof refreshResult === "object" &&
+     typeof (refreshResult as { accessToken?: unknown }).accessToken === "string"
+   ) {
+-    const refreshed = refreshResult as { accessToken: string; refreshToken?: string };
++    const refreshed = refreshResult as {
++      accessToken: string;
++      refreshToken?: string;
++      expiresIn?: number;
++    };
+     payload.accessToken = refreshed.accessToken;
++    // The seed record's expiry describes the token we just replaced.
++    const exp = decodeJwtExp(refreshed.accessToken);
++    const expiresAtMs =
++      exp !== null
++        ? exp * 1000
++        : typeof refreshed.expiresIn === "number" && refreshed.expiresIn > 0
++          ? Date.now() + refreshed.expiresIn * 1000
++          : null;
++    if (expiresAtMs !== null && Number.isFinite(expiresAtMs)) {
++      payload.expiresAt = payload.tokenExpiresAt = new Date(expiresAtMs).toISOString();
++    }
+     if (typeof refreshed.refreshToken === "string" && refreshed.refreshToken) {
+       payload.refreshToken = refreshed.refreshToken;
+     }
 diff --git a/src/app/api/v1/private/chat/completions/route.ts b/src/app/api/v1/private/chat/completions/route.ts
 new file mode 100644
-index 000000000..b17f97e46
+index 0000000000..b17f97e46d
 --- /dev/null
 +++ b/src/app/api/v1/private/chat/completions/route.ts
 @@ -0,0 +1,6 @@
@@ -917,34 +885,22 @@ index 000000000..b17f97e46
 +export const GET = handlePrivateLaneChat;
 +export const POST = handlePrivateLaneChat;
 diff --git a/src/app/api/v1/providers/[provider]/models/route.ts b/src/app/api/v1/providers/[provider]/models/route.ts
-index 9e5450be9..c6eb10b54 100644
+index 263a16b9b3..9017a2bec8 100644
 --- a/src/app/api/v1/providers/[provider]/models/route.ts
 +++ b/src/app/api/v1/providers/[provider]/models/route.ts
-@@ -3,6 +3,7 @@ import { getServiceModels } from "@/lib/db/serviceModels";
- import { isServiceBackendPluginId } from "@/lib/services/serviceBackends";
- import { getRegistryEntry } from "@omniroute/open-sse/config/providerRegistry.ts";
- import { getProviderById, getProviderByAlias } from "@/shared/constants/providers";
-+import { getProviderNodeById } from "@/lib/db/providers/nodes";
- import { isCompatibleProviderConnectionId } from "@/shared/utils/compatibleProviderId";
+@@ -83,7 +83,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ prov
+     }
+   }
  
- /**
-@@ -53,6 +54,14 @@ export async function GET(request: Request, { params }: { params: Promise<{ prov
-     } else {
-       // Allow fetching models by connection ID for compatible providers
-       const isCompatibleConnectionId = isCompatibleProviderConnectionId(rawProvider);
-+      // The catalog publishes a compatible node's models as `<prefix>/<model>`, owned by the
-+      // prefix (#8327), so match and unprefix by it rather than by the raw node id.
-+      const nodePrefix = isCompatibleConnectionId
-+        ? (await getProviderNodeById(rawProvider))?.prefix
-+        : null;
-+      if (typeof nodePrefix === "string" && nodePrefix) {
-+        providerId = providerAlias = nodePrefix;
-+      }
-       if (!isCompatibleConnectionId) {
-         return Response.json(
-           {
+-  const response = await unifiedModels.load(request);
++  // A provider listing is a lookup (the dashboard playground), not the public catalog:
++  // `exposeCombosOnly` must not empty it. Catalog auth and key filters still apply.
++  const response = await unifiedModels.load(request, {}, { ignoreExposeCombosOnly: true });
+   const payload = (await response
+     .clone()
+     .json()
 diff --git a/src/lib/db/modelCapabilityOverrides.ts b/src/lib/db/modelCapabilityOverrides.ts
-index ced5a2bde..8e70ea9a6 100644
+index ced5a2bde1..8e70ea9a65 100644
 --- a/src/lib/db/modelCapabilityOverrides.ts
 +++ b/src/lib/db/modelCapabilityOverrides.ts
 @@ -7,10 +7,9 @@ import { getDbInstance } from "./core";
@@ -1021,22 +977,26 @@ index ced5a2bde..8e70ea9a6 100644
        : parseReasoningEffortsOverride(value);
 diff --git a/src/lib/db/privateLane.ts b/src/lib/db/privateLane.ts
 new file mode 100644
-index 000000000..a84ebbee5
+index 0000000000..b2cac44693
 --- /dev/null
 +++ b/src/lib/db/privateLane.ts
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,52 @@
 +import { getDbInstance } from "./core";
 +
 +// Set per instance. Unset means the private lane refuses every request.
 +export const PRIVATE_LANE_MODEL = process.env.OMC_PRIVATE_LANE_MODEL ?? "";
-+export const PRIVATE_LANE_BASE_URL = (process.env.OMC_PRIVATE_LANE_BASE_URL ?? "").replace(/\/+$/, "");
++export const PRIVATE_LANE_BASE_URL = (process.env.OMC_PRIVATE_LANE_BASE_URL ?? "").replace(
++  /\/+$/,
++  ""
++);
 +export const PRIVATE_LANE_TARGET = `vllm/${PRIVATE_LANE_MODEL}`;
 +export const PRIVATE_LANE_UPSTREAM = `${PRIVATE_LANE_BASE_URL}/chat/completions`;
 +
 +/** No credentials selected. This special lane never uses general routing/proxy configuration. */
 +export function requirePrivateLane(target: unknown, sourceMethod: unknown) {
 +  if (!PRIVATE_LANE_MODEL || !PRIVATE_LANE_BASE_URL) throw new Error("private_lane_trust_required");
-+  if (target !== PRIVATE_LANE_TARGET || sourceMethod !== "GET") throw new Error("private_lane_trust_required");
++  if (target !== PRIVATE_LANE_TARGET || sourceMethod !== "GET")
++    throw new Error("private_lane_trust_required");
 +  const db = getDbInstance();
 +  // Do not let the general prefix winner rule turn ambiguity into a security grant.
 +  const nodes = db
@@ -1074,10 +1034,10 @@ index 000000000..a84ebbee5
 +  return { provider: node.id, connectionId: connections[0].id, model: PRIVATE_LANE_MODEL };
 +}
 diff --git a/src/proxy.ts b/src/proxy.ts
-index b99a0789d..7bc50619f 100644
+index 293ebc7a67..d02cf06aba 100644
 --- a/src/proxy.ts
 +++ b/src/proxy.ts
-@@ -38,8 +38,13 @@ export const config = {
+@@ -44,8 +44,13 @@ export const config = {
      "/dashboard/:path*",
      "/home",
      "/home/:path*",
@@ -1094,7 +1054,7 @@ index b99a0789d..7bc50619f 100644
      "/:v1betaseg([vV]1[bB][eE][tT][aA])/:path*",
      "/:v1betaseg([vV]1[bB][eE][tT][aA])",
 diff --git a/tests/unit/authz/proxy-contract.test.ts b/tests/unit/authz/proxy-contract.test.ts
-index 438eb0f24..cc3e5c59f 100644
+index 9051059a05..f2ceecfccc 100644
 --- a/tests/unit/authz/proxy-contract.test.ts
 +++ b/tests/unit/authz/proxy-contract.test.ts
 @@ -52,7 +52,7 @@ test("proxy.ts delegates to runAuthzPipeline with enforce: true", () => {
@@ -1120,7 +1080,7 @@ index 438eb0f24..cc3e5c59f 100644
      '"/:chatseg([cC][hH][aA][tT])/:path*"',
      '"/:respseg([rR][eE][sS][pP][oO][nN][sS][eE][sS])/:path*"',
 diff --git a/tests/unit/authz/proxy-matcher-case.test.ts b/tests/unit/authz/proxy-matcher-case.test.ts
-index 4069fd9b6..d6214c91e 100644
+index 4069fd9b68..d6214c91e9 100644
 --- a/tests/unit/authz/proxy-matcher-case.test.ts
 +++ b/tests/unit/authz/proxy-matcher-case.test.ts
 @@ -66,6 +66,47 @@ test("proxy matcher covers uppercase / mixed-case client aliases (GHSA-jvqc-mp9f
@@ -1171,31 +1131,64 @@ index 4069fd9b6..d6214c91e 100644
  test("classifyRoute treats uppercase client aliases as CLIENT_API, not management fallback", () => {
    assert.equal(classifyRoute("/V1/chat/completions", "POST").routeClass, "CLIENT_API");
    assert.equal(classifyRoute("/V1BETA/models", "GET").routeClass, "CLIENT_API");
-diff --git a/tests/unit/inner-failover-key-policy.test.mjs b/tests/unit/inner-failover-key-policy.test.mjs
-new file mode 100644
-index 000000000..666ca8a0c
---- /dev/null
-+++ b/tests/unit/inner-failover-key-policy.test.mjs
-@@ -0,0 +1,16 @@
-+import test from 'node:test';
-+import assert from 'node:assert/strict';
-+import { readFileSync } from 'node:fs';
+diff --git a/tests/unit/codex-import-refresh-validation-7522.test.ts b/tests/unit/codex-import-refresh-validation-7522.test.ts
+index 5fd1294458..729725a32c 100644
+--- a/tests/unit/codex-import-refresh-validation-7522.test.ts
++++ b/tests/unit/codex-import-refresh-validation-7522.test.ts
+@@ -176,6 +176,36 @@ test("import: creates the connection (with rotated tokens) when the refresh_toke
+       assert.ok(created, "connection should be persisted for a valid refresh_token");
+       assert.equal(created?.accessToken, "rotated-access-token");
+       assert.equal(created?.refreshToken, "rotated-refresh-token");
++      const remainingMs = Date.parse(String(created?.expiresAt)) - Date.now();
++      assert.ok(
++        remainingMs > 3_590_000 && remainingMs <= 3_600_000,
++        "rotated access-token expiry must replace the seed-token expiry"
++      );
++      assert.equal(created?.tokenExpiresAt, created?.expiresAt);
++    }
++  );
++});
 +
-+// ponytail: static contract for the two actual call sites; live/bundled routing
-+// needs its own runtime check. No evaluation, fake source execution, or credentials.
-+const source = readFileSync(new URL('../../open-sse/handlers/chatCore.ts', import.meta.url), 'utf8');
-+for (const provider of ['codex', 'antigravity']) {
-+  const call = source.match(new RegExp(`await getProviderCredentials\\(\\s*"${provider}",([\\s\\S]*?)\\)\\.catch\\(\\(\\) => null\\)`));
-+  assert.ok(call, `${provider} real inner selector call exists`);
-+  test(`${provider} inner retry retains key policy, requested model, and excluded accounts`, () => {
-+    const excluded = provider === 'codex' ? 'codexExcludedIds' : 'antigravityByopExcludedIds';
-+    assert.equal(call[1].replace(/\s+/g, '').replace(/,}/g, '}'),
-+      `null,apiKeyInfo?.allowedConnections??null,modelToCall||model||requestedModel||null,{excludeConnectionIds:[...${excluded}]}`);
-+  });
-+}
++test("import: rotated JWT expiry takes precedence over the seed expiry and expires_in", async () => {
++  const exp = 1_900_000_000;
++  await withMockedFetch(
++    (async () =>
++      jsonResponse({
++        access_token: jwtWithExpiry(exp),
++        refresh_token: "rotated-jwt-refresh",
++        expires_in: 3600,
++      })) as unknown as typeof fetch,
++    async () => {
++      const { body } = await postImport({
++        accounts: {
++          ...BASE_RECORD,
++          email: "jwt-expiry@example.com",
++          expired: "2000-01-01T00:00:00Z",
++        },
++      });
++      assert.equal(body.imported, 1);
++      const created = await providersDb.getProviderConnectionById(body.results[0].connectionId);
++      assert.equal(created?.expiresAt, new Date(exp * 1000).toISOString());
+     }
+   );
+ });
+diff --git a/tests/unit/healthz-route.test.ts b/tests/unit/healthz-route.test.ts
+index bdbadc95eb..eb497eeb56 100644
+--- a/tests/unit/healthz-route.test.ts
++++ b/tests/unit/healthz-route.test.ts
+@@ -78,7 +78,8 @@ test("native startup and shutdown hooks drive the health lifecycle", () => {
+ 
+ test("/healthz bypasses the centralized auth proxy matcher", () => {
+   const proxySource = fs.readFileSync("src/proxy.ts", "utf8");
+-  const matcherBlock = proxySource.match(/matcher:\s*\[([\s\S]*?)\]/)?.[1];
++  // The array closes on its own line; entries may contain `]` (e.g. `%2[fF]`).
++  const matcherBlock = proxySource.match(/matcher:\s*\[([\s\S]*?)\n\s*\]/)?.[1];
+   assert.ok(matcherBlock, "proxy matcher configuration must remain discoverable");
+ 
+   const configuredMatchers = Array.from(
 diff --git a/tests/unit/private-lane-chat.test.ts b/tests/unit/private-lane-chat.test.ts
 new file mode 100644
-index 000000000..f6768e651
+index 0000000000..f6768e6511
 --- /dev/null
 +++ b/tests/unit/private-lane-chat.test.ts
 @@ -0,0 +1,503 @@
@@ -1704,10 +1697,10 @@ index 000000000..f6768e651
 +});
 diff --git a/tests/unit/private-lane-framework-body.test.mjs b/tests/unit/private-lane-framework-body.test.mjs
 new file mode 100644
-index 000000000..982e9a1cd
+index 0000000000..f69b98b03a
 --- /dev/null
 +++ b/tests/unit/private-lane-framework-body.test.mjs
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,230 @@
 +// Adapted from retained Sol V3 probe: select middleware using the ACTUAL installed Next matcher.
 +// The original forced-middleware probe is unchanged in review evidence; its body-refusal assertion remains here.
 +import { test, after } from "node:test";
@@ -1761,6 +1754,8 @@ index 000000000..982e9a1cd
 +  rewrites: { beforeFiles: [], afterFiles: [], fallback: [] },
 +});
 +put("prerender-manifest.json", { preview: { previewModeId: "synthetic-preview-id" } });
++// Next >= 16.4 reads preview props from their own server manifest.
++put("server/preview-props.json", { previewModeId: "synthetic-preview-id" });
 +put("server/pages-manifest.json", {});
 +put("server/functions-config-manifest.json", { functions: { "/_middleware": { matchers } } });
 +put("app-path-routes-manifest.json", { [canonical + "/route"]: canonical });
@@ -1938,7 +1933,7 @@ index 000000000..982e9a1cd
 +  });
 diff --git a/tests/unit/private-lane-fully-trusted.test.ts b/tests/unit/private-lane-fully-trusted.test.ts
 new file mode 100644
-index 000000000..9c93125e0
+index 0000000000..9c93125e05
 --- /dev/null
 +++ b/tests/unit/private-lane-fully-trusted.test.ts
 @@ -0,0 +1,147 @@
@@ -2091,10 +2086,10 @@ index 000000000..9c93125e0
 +});
 diff --git a/tests/unit/prompt-aware-routing.test.ts b/tests/unit/prompt-aware-routing.test.ts
 new file mode 100644
-index 000000000..230944190
+index 0000000000..6e18312042
 --- /dev/null
 +++ b/tests/unit/prompt-aware-routing.test.ts
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,233 @@
 +import { test, after } from "node:test";
 +import assert from "node:assert/strict";
 +import { mkdtempSync, rmSync } from "node:fs";
@@ -2109,7 +2104,7 @@ index 000000000..230944190
 +const { resolveAutoStrategyOrder } =
 +  await import("@omniroute/open-sse/services/combo/resolveAutoStrategy.ts");
 +const { rrCounters } = await import("@omniroute/open-sse/services/combo/rrState.ts");
-+const { getTaskFitnessWithSource, setUserFitnessOverride, clearUserFitnessOverride } =
++const { setUserFitnessOverride, clearUserFitnessOverride } =
 +  await import("@omniroute/open-sse/services/autoCombo/taskFitness.ts");
 +const { normalizeScoringWeights } =
 +  await import("@omniroute/open-sse/services/autoCombo/scoring.ts");
@@ -2162,7 +2157,15 @@ index 000000000..230944190
 +  weights: normalizeScoringWeights({ taskFit: 1 } as ScoringWeights),
 +});
 +
-+test("same eligible pool chooses code specialist vs analysis model based on prompt intent", () => {
++test("same eligible pool chooses code specialist vs analysis model based on prompt intent", (t) => {
++  // v3.8.54 (#11503) dropped version-less family rows from the static fitness
++  // table, so the per-task preference comes from explicit fitness data here.
++  setUserFitnessOverride("gpt-5.5", "coding", 0.9);
++  setUserFitnessOverride("sonnet", "analysis", 0.9);
++  t.after(() => {
++    clearUserFitnessOverride("gpt-5.5", "coding");
++    clearUserFitnessOverride("sonnet", "analysis");
++  });
 +  const coding = orderPromptAwareTargets(base());
 +  const analysis = orderPromptAwareTargets({
 +    ...base(),
@@ -2176,22 +2179,6 @@ index 000000000..230944190
 +});
 +test("math maps to analysis rather than generic default", () => {
 +  assert.equal(mapIntentToTaskType("math"), "analysis");
-+});
-+test("compatible Claude bare-family and Codex provider fitness use existing family table", () => {
-+  assert.equal(
-+    getTaskFitnessWithSource("sonnet", "analysis").score,
-+    getTaskFitnessWithSource("claude-sonnet", "analysis").score
-+  );
-+  assert.equal(
-+    getTaskFitnessWithSource("gpt-5.5", "coding", "codex").score,
-+    getTaskFitnessWithSource("codex", "coding").score
-+  );
-+  assert.equal(getTaskFitnessWithSource("gpt-5.5", "coding", "openai").source, "wildcard_boost");
-+});
-+test("explicit fitness override retains precedence over alias heuristics", () => {
-+  setUserFitnessOverride("sonnet", "analysis", 0.12);
-+  assert.equal(getTaskFitnessWithSource("sonnet", "analysis").score, 0.12);
-+  clearUserFitnessOverride("sonnet", "analysis");
 +});
 +test("unknown or disabled classification rotates the same pool", () => {
 +  rrCounters.clear();
@@ -2294,58 +2281,295 @@ index 000000000..230944190
 +  assert.ok(logs.some((line) => line.includes("prompt-aware")));
 +  assert.ok(logs.every((line) => !line.includes("Implement a Python function")));
 +});
++test("prompt-aware pre-gate honors outputLimitAdvisory like the main compat filter", async () => {
++  const { saveModelsDevCapabilities } = await import("@/lib/modelsDevSync.ts");
++  saveModelsDevCapabilities({
++    "unit-out": {
++      small: {
++        tool_call: true,
++        reasoning: null,
++        attachment: null,
++        structured_output: null,
++        temperature: null,
++        modalities_input: "[]",
++        modalities_output: "[]",
++        knowledge_cutoff: null,
++        release_date: null,
++        last_updated: null,
++        status: null,
++        family: null,
++        open_weights: null,
++        limit_context: 262144,
++        limit_input: null,
++        limit_output: 4096,
++        interleaved_field: null,
++      },
++    },
++  });
++  const small = target("unit-out", "small");
++  const resolve = (config: Record<string, unknown>) =>
++    resolveAutoStrategyOrder({
++      orderedTargets: [small],
++      body: { messages: [{ role: "user", content: "Implement it" }], max_tokens: 16384 },
++      combo: { name: "smart-out", models: [], config: { auto: { promptAwareRouting: true } } },
++      settings: null,
++      config,
++      resilienceSettings: { quotaPreflight: { enabled: false } } as never,
++      log: { info() {}, warn() {} },
++      buildAutoCandidates: async () => [candidate(small)],
++    });
++  assert.ok("earlyResponse" in (await resolve({})), "output limit stays hard by default");
++  const advisory = await resolve({ outputLimitAdvisory: true });
++  assert.ok("orderedTargets" in advisory);
++  if ("orderedTargets" in advisory) assert.equal(advisory.orderedTargets[0]?.provider, "unit-out");
++});
 diff --git a/tests/unit/provider-models-v1-route.test.ts b/tests/unit/provider-models-v1-route.test.ts
-index c20eda354..79d9146c0 100644
+index 91ece226e8..3ad213af63 100644
 --- a/tests/unit/provider-models-v1-route.test.ts
 +++ b/tests/unit/provider-models-v1-route.test.ts
-@@ -121,3 +121,45 @@ test("GET /v1/providers/:provider/models rejects non-matching connection-like st
-   const body = await res.json();
-   assert.equal(body.error?.code, "invalid_provider");
+@@ -163,6 +163,43 @@ test("#13829: compatible provider IDs return synced models owned by their public
+   assert.equal(body.data[0].parent, null);
  });
-+
-+test("GET /v1/providers/:provider/models lists a compatible node's models published under its prefix", async () => {
-+  // Since #8327 the catalog publishes compatible-node models as `<prefix>/<model>` owned by the
-+  // prefix, so filtering by the raw node id returned [] and the provider-page playground had no
-+  // model to send ("Missing model").
-+  const providersDb = await import("../../src/lib/db/providers.ts");
-+  const modelsDb = await import("../../src/lib/db/models.ts");
-+  const nodeId = "openai-compatible-chat-bbd954a5-0000-4000-8000-000000000000";
-+  await providersDb.createProviderNode({
-+    id: nodeId,
-+    type: "openai-compatible",
-+    name: "Local vLLM",
+ 
++test("exposeCombosOnly trims /v1/models but not a provider's own model listing", async () => {
++  const settingsDb = await import("../../src/lib/db/settings.ts");
++  const providerId = "openai-compatible-chat-b1b2c3d4-e5f6-7890-abcd-ef1234567890";
++  await providerNodesDb.createProviderNode({
++    id: providerId,
++    type: "openai-compatible-chat",
++    name: "Local",
 +    prefix: "local",
-+    baseUrl: "http://192.0.2.10:8000/v1",
-+    chatPath: "/v1/chat/completions",
-+    modelsPath: "/v1/models",
++    apiType: "chat",
++    baseUrl: "https://inference.example.com/v1",
 +  });
 +  const connection = await providersDb.createProviderConnection({
-+    provider: nodeId,
++    provider: providerId,
 +    authType: "apikey",
-+    name: "main",
-+    apiKey: "sk-test",
++    name: "Local",
++    apiKey: "test-key",
 +    isActive: true,
 +    testStatus: "active",
-+    providerSpecificData: { baseUrl: "http://192.0.2.10:8000/v1" },
 +  });
-+  await modelsDb.replaceSyncedAvailableModelsForConnection(
-+    nodeId,
-+    (connection as { id: string }).id,
-+    [{ id: "qwen3.8", name: "qwen3.8", source: "imported", supportedEndpoints: ["chat"] }]
-+  );
++  await modelsDb.replaceSyncedAvailableModelsForConnection(providerId, String(connection.id), [
++    { id: "qwen", name: "qwen", source: "imported" },
++  ]);
++  await settingsDb.updateSettings({ exposeCombosOnly: true });
 +
-+  (await import("../../src/app/api/v1/models/catalogCache.ts")).__resetCatalogBuilderRunsForTest();
++  const catalogBody = (await (
++    await catalog.getUnifiedModelsResponse(new Request("http://localhost/api/v1/models"))
++  ).json()) as { data: Array<{ id: string }> };
++  assert.ok(!catalogBody.data.some((model) => model.id === "local/qwen"));
 +
-+  const res = await callGET(nodeId);
++  const res = await callGET(providerId);
 +  assert.equal(res.status, 200);
-+  const body = (await res.json()) as { data: Array<{ id: string }> };
 +  assert.deepEqual(
-+    body.data.map((m) => m.id),
-+    ["qwen3.8"]
++    (await res.json()).data.map((model: { id: string }) => model.id),
++    ["qwen"]
 +  );
 +});
++
+ test("GET /v1/providers/:provider/models rejects non-matching connection-like strings", async () => {
+   // Looks like a connection ID but with wrong prefix
+   const res = await callGET("custom-compatible-chat-a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+diff --git a/tests/unit/quota-availability-auth.test.ts b/tests/unit/quota-availability-auth.test.ts
+index cd21b645ca..12afd70e3f 100644
+--- a/tests/unit/quota-availability-auth.test.ts
++++ b/tests/unit/quota-availability-auth.test.ts
+@@ -7,7 +7,8 @@ import { proxy, config } from "../../src/proxy.ts";
+ 
+ test("central proxy rejects anonymous availability and provider-limits management GETs", async () => {
+   await updateSettings({ requireLogin: true });
+-  assert.ok(config.matcher.includes("/api/:path*"));
++  // "/api/:path*", or its form that excludes only the self-authenticated private lane.
++  assert.ok(config.matcher.some((m) => m === "/api/:path*" || m.startsWith("/api/:path((?!")));
+   for (const path of ["/api/usage/availability", "/api/usage/provider-limits"]) {
+     assert.equal(classifyRoute(path, "GET").routeClass, "MANAGEMENT");
+     const response = await proxy(
+diff --git a/tests/unit/refresh-serializer.test.ts b/tests/unit/refresh-serializer.test.ts
+index ee9554e23b..b87390b6c9 100644
+--- a/tests/unit/refresh-serializer.test.ts
++++ b/tests/unit/refresh-serializer.test.ts
+@@ -95,6 +95,43 @@ test("an error in one refresh does not deadlock the group queue", async () => {
+   assert.equal(recovered, "ok", "queue must keep flowing after a failed refresh");
+ });
+ 
++test("work inherited from a released refresh must acquire the lane again", async () => {
++  __resetRefreshSerializerForTest();
++  let releaseDeferred!: () => void;
++  let releaseSibling!: () => void;
++  let started!: () => void;
++  const deferredGate = new Promise<void>((resolve) => {
++    releaseDeferred = resolve;
++  });
++  const siblingGate = new Promise<void>((resolve) => {
++    releaseSibling = resolve;
++  });
++  const siblingStarted = new Promise<void>((resolve) => {
++    started = resolve;
++  });
++  let deferred!: Promise<void>;
++  const order: string[] = [];
++  await serializeRefresh("codex", async () => {
++    deferred = deferredGate.then(() =>
++      serializeRefresh("codex", async () => {
++        order.push("deferred");
++      })
++    );
++  });
++  const sibling = serializeRefresh("codex", async () => {
++    started();
++    await siblingGate;
++    order.push("sibling");
++  });
++  await siblingStarted;
++  releaseDeferred();
++  await delay(10);
++  assert.deepEqual(order, []);
++  releaseSibling();
++  await Promise.all([sibling, deferred]);
++  assert.deepEqual(order, ["sibling", "deferred"]);
++});
++
+ test("rotationGroupFor maps the OpenAI Auth0 family together", () => {
+   assert.equal(rotationGroupFor("codex"), rotationGroupFor("openai"));
+   assert.notEqual(rotationGroupFor("codex"), rotationGroupFor("claude"));
+diff --git a/tests/unit/response-lifetime.test.ts b/tests/unit/response-lifetime.test.ts
+new file mode 100644
+index 0000000000..69ad30d734
+--- /dev/null
++++ b/tests/unit/response-lifetime.test.ts
+@@ -0,0 +1,129 @@
++import assert from "node:assert/strict";
++import fs from "node:fs";
++import os from "node:os";
++import path from "node:path";
++import test from "node:test";
++
++process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-response-lifetime-"));
++const { releaseWhenResponseComplete } = await import("../../open-sse/utils/responseLifetime.ts");
++const { handleComboChat } = await import("../../open-sse/services/combo.ts");
++
++const sse = { "content-type": "text/event-stream" };
++
++test("stream capacity survives headers and releases once on EOF, cancel or error", async () => {
++  let releases = 0;
++  const release = () => {
++    releases++;
++  };
++  let upstream!: ReadableStreamDefaultController<Uint8Array>;
++  const response = releaseWhenResponseComplete(
++    new Response(
++      new ReadableStream({
++        start(controller) {
++          upstream = controller;
++        },
++      }),
++      { headers: sse }
++    ),
++    release
++  );
++  assert.equal(releases, 0);
++  const reader = response.body!.getReader();
++  upstream.enqueue(new TextEncoder().encode("data: OK\n\n"));
++  await reader.read();
++  assert.equal(releases, 0);
++  upstream.close();
++  assert.equal((await reader.read()).done, true);
++  assert.equal(releases, 1);
++  await reader.cancel();
++  assert.equal(releases, 1);
++
++  let cancelled = false;
++  const cancelledResponse = releaseWhenResponseComplete(
++    new Response(
++      new ReadableStream({
++        cancel() {
++          cancelled = true;
++        },
++      }),
++      { headers: sse }
++    ),
++    release
++  );
++  await cancelledResponse.body!.cancel();
++  assert.equal(cancelled, true);
++  assert.equal(releases, 2);
++
++  const failedResponse = releaseWhenResponseComplete(
++    new Response(
++      new ReadableStream({
++        start(controller) {
++          controller.error(new Error("upstream failed"));
++        },
++      }),
++      { headers: sse }
++    ),
++    release
++  );
++  await assert.rejects(failedResponse.text(), /upstream failed/);
++  assert.equal(releases, 3);
++  releaseWhenResponseComplete(new Response("OK"), release);
++  assert.equal(releases, 4);
++});
++
++test("round-robin holds a streaming target's concurrency slot until its body ends", async () => {
++  const encoder = new TextEncoder();
++  const chunk = (data: unknown) => encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
++  const content = chunk({ choices: [{ index: 0, delta: { content: "hello" } }] });
++  let finishFirst!: () => void;
++  const openStream = () =>
++    new Response(
++      new ReadableStream<Uint8Array>({
++        start(controller) {
++          controller.enqueue(content);
++          finishFirst = () => {
++            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
++            controller.close();
++          };
++        },
++      }),
++      { status: 200, headers: sse }
++    );
++  const closedStream = () =>
++    new Response(
++      new ReadableStream<Uint8Array>({
++        start(controller) {
++          controller.enqueue(content);
++          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
++          controller.close();
++        },
++      }),
++      { status: 200, headers: sse }
++    );
++  const call = (handleSingleModel: () => Promise<Response>) =>
++    handleComboChat({
++      body: { stream: true },
++      combo: {
++        name: "rr-stream-slot",
++        strategy: "round-robin",
++        models: ["model-a"],
++        config: { maxRetries: 0, concurrencyPerModel: 1, queueTimeoutMs: 100 },
++      },
++      handleSingleModel,
++      isModelAvailable: async () => true,
++      log: { info() {}, warn() {}, error() {}, debug() {} },
++      settings: null,
++      allCombos: null,
++    });
++
++  const first = await call(async () => openStream());
++  assert.equal(first.ok, true);
++  const whileStreaming = await call(async () => closedStream());
++  assert.equal(whileStreaming.ok, false, "the slot is still held by the open stream");
++
++  finishFirst();
++  assert.match(await first.text(), /hello/);
++  const afterEof = await call(async () => closedStream());
++  assert.equal(afterEof.ok, true, "EOF released the slot");
++  await afterEof.text();
++});
 diff --git a/tests/unit/ui/model-capability-overrides-tab-9557.test.tsx b/tests/unit/ui/model-capability-overrides-tab-9557.test.tsx
-index 0a93d4644..7e9cbb719 100644
+index 0a93d4644e..7e9cbb7197 100644
 --- a/tests/unit/ui/model-capability-overrides-tab-9557.test.tsx
 +++ b/tests/unit/ui/model-capability-overrides-tab-9557.test.tsx
 @@ -56,6 +56,44 @@ afterEach(() => {
@@ -2394,15 +2618,15 @@ index 0a93d4644..7e9cbb719 100644
      const catalog = {
        codex: {
 diff --git a/tsconfig.typecheck-core.json b/tsconfig.typecheck-core.json
-index 3b37f28ef..1be17308b 100644
+index 1a1d97131c..a2aed5cc13 100644
 --- a/tsconfig.typecheck-core.json
 +++ b/tsconfig.typecheck-core.json
-@@ -35,7 +35,12 @@
-     "open-sse/translator/registry.ts",
+@@ -37,7 +37,12 @@
      "open-sse/handlers/responseSanitizer.ts",
      "open-sse/handlers/responseTranslator.ts",
--    "src/lib/tokenHealthCheckCursor.ts"
-+    "src/lib/tokenHealthCheckCursor.ts",
+     "src/lib/tokenHealthCheckCursor.ts",
+-    "src/shared/constants/iconMap.ts"
++    "src/shared/constants/iconMap.ts",
 +    "src/lib/db/privateLane.ts",
 +    "src/lib/db/modelCapabilityOverrides.ts",
 +    "src/app/api/model-capability-overrides/route.ts",

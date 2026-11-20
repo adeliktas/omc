@@ -12,6 +12,7 @@ import re
 import runpy
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -26,6 +27,7 @@ PREFIX, CAP, LOW_WATER = CFG.get("backlog_prefix", "[backlog]"), 800_000, 4  # k
 WINDOW = 10_800  # children inherit it; 1h killed most multi-leaf cycles just before publication
 HUMAN = "omc-needs-human"  # issues the fleet gave up on
 BATCH = 20  # issues (with bodies) per lead; the manager plans at most 20 children
+BODY = 2000  # chars per catalog body; sync summaries stay under ~1.6K, so they arrive whole
 ACTIVE = ("inbox", "in_progress", "review")
 mc = runpy.run_path(str(HERE / "mc"))["request"]
 
@@ -64,12 +66,29 @@ def rows():
     return out
 
 
+def gh(*args):
+    """GitHub's API answers 502-504 for a minute at times (2026-11-03 13:00Z: one GraphQL 503 crashed a tick with a
+    bare traceback and woke the watchdog). Retry those; any other failure names gh's error in the log."""
+    for wait in (20, 60, None):
+        try:
+            return subprocess.run(["gh", *args, "-R", REPO], capture_output=True, text=True, timeout=120,
+                                  check=True).stdout
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or "").strip()
+            if wait is None or not re.search(r"HTTP 50[234]|Gateway Timeout|No server is currently available", err):
+                sys.exit(f"next-batch: gh {' '.join(args[:2])} failed: {err[:200]}")
+            time.sleep(wait)
+
+
 def open_pr_issues():
     """Issues an open fleet PR already closes: never plan them again."""
-    prs = json.loads(subprocess.run(["gh", "pr", "list", "-R", REPO, "--state", "open", "--search", "head:omc/",
-                                     "--limit", "500", "--json", "body"],
-                                    capture_output=True, text=True, timeout=120, check=True).stdout)
+    prs = json.loads(gh("pr", "list", "--state", "open", "--search", "head:omc/", "--limit", "500", "--json", "body"))
     return {int(n) for pr in prs for n in re.findall(r"(?i)closes #(\d+)", pr.get("body") or "")}
+
+
+def excerpt(body):
+    """The offline planner reads a silent mid-sentence cut as a missing requirement (2026-10-29)."""
+    return body if len(body) <= BODY else body[:BODY].rsplit("\n", 1)[0] + "\n(... shortened here; the issue continues)"
 
 
 def close(task, reason):
@@ -87,7 +106,6 @@ def close(task, reason):
 
 def give_up(lead, numbers):
     """The planner found nothing offline-actionable: hand the lead's issues to humans."""
-    gh = lambda *a: subprocess.run(["gh", *a, "-R", REPO], capture_output=True, text=True, timeout=120, check=True)
     gh("label", "create", HUMAN, "--force", "--color", "d93f0b",
        "--description", "The OMC fleet cannot do this offline; remove the label to re-queue")
     for n in numbers:
@@ -104,9 +122,8 @@ def main():
     by_id = {t["id"]: t for t in tasks}
     held = lambda k: k["status"] == "inbox" and k.get("is_blocked") and all(  # waits on held work only
         by_id.get(d, {}).get("status") in ("paused", "blocked", "cancelled") for d in k.get("blocked_by_task_ids") or [])
-    issues = json.loads(subprocess.run(["gh", "issue", "list", "-R", REPO, "--label", "omc-fleet", "--state", "open",
-                                        "--limit", "500", "--json", "number,title,body,labels"],
-                                       capture_output=True, text=True, timeout=120, check=True).stdout)
+    issues = json.loads(gh("issue", "list", "--label", "omc-fleet", "--state", "open", "--limit", "500",
+                           "--json", "number,title,body,labels"))
     listed = lambda lead, i: f"\n- #{i['number']} {i['title']}\n" in (lead.get("description") or "")  # its catalog
     # A paused/blocked lead (e.g. its planner failed) must not hold the backlog forever.
     leads = [t for t in tasks if t["title"].startswith(PREFIX) and t["status"] in ("inbox", "in_progress", "review")]
@@ -151,7 +168,7 @@ def main():
         title=f"{PREFIX}: next batch of open omc-fleet GitHub issues",
         # Bodies give the sandboxed planner the content; a bounded batch keeps planning cheap.
         description=DESC.format(repo=REPO, lang=LANG, catalog="\n".join(
-            f"- #{i['number']} {i['title']}\n{(i.get('body') or '')[:1200]}"
+            f"- #{i['number']} {i['title']}\n{excerpt(i.get('body') or '')}"
             for i in sorted(todo, key=lambda i: i["number"])[:BATCH])
             + (f"\n\n({len(todo) - BATCH} more open issues follow in later batches.)" if len(todo) > BATCH else "")),
         status="inbox", execution_mode="team", execution_lane="harness",

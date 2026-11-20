@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 function isQwen(model: { provider: string; id: string } | undefined) {
-  return model && ["omniroute-api", "openclaw-infer"].includes(model.provider)
+  return model && ["omniroute-api", "DN-jetsonagx-qwen", "openclaw-infer"].includes(model.provider)
     && ["vllm/Qwen3.8-27B-FP8", "Qwen3.8-27B-FP8"].includes(model.id);
 }
 
@@ -19,6 +19,8 @@ export default function (pi: ExtensionAPI) {
     return { content: [{ type: "text", text: `${text.slice(0, 8000)}\n[Truncated ${text.length} characters; full output: ${path}. Read a narrow slice rather than the whole file.]` }, ...event.content.filter(block => block.type !== "text")] };
   });
   pi.on("session_before_compact", async (event, ctx) => {
+    // Only Qwen sessions need chunked compaction for the 57k window; others use pi's default with their own model.
+    if (!isQwen(ctx.model)) return;
     try {
       const model = ctx.modelRegistry.find("omniroute-api", "vllm/Qwen3.8-27B-FP8");
       if (!model) throw new Error("Local compaction model unavailable");
@@ -33,36 +35,43 @@ export default function (pi: ExtensionAPI) {
       const text = [preparation.previousSummary ?? "", serializeConversation(convertToLlm([
         ...preparation.messagesToSummarize, ...preparation.turnPrefixMessages,
       ]))].join("\n\n");
-      // ponytail: serial 6000-codepoint chunks for the 65k local context; no premium fallback.
-      const chunks = text.match(/[\s\S]{1,6000}/gu) ?? ["No conversation entries."];
+      // ponytail: serial 80000-codepoint chunks (~25k tokens) for the 65k local context; each chunk
+      // re-emits the whole summary at ~10 tok/s, so fewer chunks is what keeps this minutes, not hours.
+      // No premium fallback; parallel map + one merge call if 272k sessions still take too long.
+      const chunks = text.match(/[\s\S]{1,80000}/gu) ?? ["No conversation entries."];
       const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
       let result: Awaited<ReturnType<typeof compact>> | undefined;
-      for (const chunk of chunks) {
+      for (const [index, chunk] of chunks.entries()) {
         if (event.signal.aborted) throw new Error("Compaction cancelled");
+        ctx.ui.setStatus("qwen-compaction", `local compaction ${index + 1}/${chunks.length}`);
         result = await compact({ ...preparation, previousSummary: result?.summary,
           messagesToSummarize: [{ role: "user", content: chunk, timestamp: Date.now() }],
           turnPrefixMessages: [], isSplitTurn: false,
           settings: { ...preparation.settings, reserveTokens: 5120 },
         }, model, undefined, undefined, event.customInstructions, event.signal, "off",
         async (target, context, options) => {
-          if (Buffer.byteLength(JSON.stringify(context)) > 48000) throw new Error("Local compaction input too large");
+          if (Buffer.byteLength(JSON.stringify(context)) > 150000) throw new Error("Local compaction input too large");
           const stream = await ctx.modelRegistry.streamSimple(target, context, options);
           const response = await stream.result();
-          if (event.signal.aborted || !response.content.some(block => block.type === "text" && block.text.trim())) {
+          // Error responses (e.g. OmniRoute's 429 "Semaphore timeout" while fleet work holds the shared
+          // Qwen slot) go back to compact() so its retry policy and error message apply.
+          if (event.signal.aborted || (response.stopReason !== "error" && !response.content.some(block => block.type === "text" && block.text.trim()))) {
             throw new Error("Local compaction returned no complete text");
           }
           return stream;
-        });
+        }, undefined, { enabled: true, maxRetries: 5, baseDelayMs: 30000 });
         if (result.usage) {
           for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) usage[key] += result.usage[key];
           for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) usage.cost[key] += result.usage.cost[key];
         }
       }
       return { compaction: { ...result!, usage, details: { ...(result!.details as object), qwenCompaction: true, chunks: chunks.length } } };
-    } catch {
-      ctx.ui.notify("Local compaction stopped; history unchanged and no premium fallback.", "error");
+    } catch (error) {
+      ctx.ui.notify(`Local compaction stopped (${error instanceof Error ? error.message : String(error)}); history unchanged and no premium fallback.`, "error");
       return { cancel: true };
+    } finally {
+      ctx.ui.setStatus("qwen-compaction", undefined);
     }
   });
 }

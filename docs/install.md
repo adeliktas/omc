@@ -11,31 +11,21 @@ Instances never share state. Each one can be removed completely with `deploy/pur
 
 ## Requirements
 
-- **System:** Linux with OpenRC 0.63 or newer, or systemd. The scripts detect which one runs
-  and set up the instance's services for it.
-  - **Gentoo with OpenRC** is what OMC is developed and tested on.
-  - **Debian 13 (trixie) or newer with systemd** is supported by the scripts but **not yet tested
-    on a real host**. Debian 12 ships Python 3.11, which is too old. Ubuntu works the same way;
-    on Ubuntu 24.04+ AppArmor may block rootless Docker's user namespaces (see Docker's rootless
-    docs).
-- **Packages** (Gentoo atom / Debian package):
+Requirements are the same Gentoo stack OMC is developed on:
 
-  | Needed for | Gentoo | Debian |
-  |---|---|---|
-  | Docker 29+ and Compose | `app-containers/docker`, `app-containers/docker-cli`, `app-containers/docker-compose` | `docker-ce`, `docker-ce-cli`, `docker-compose-plugin` from Docker's apt repository |
-  | `newuidmap` | `sys-apps/shadow` | `uidmap` |
-  | sandboxing | `sys-apps/bubblewrap` | `bubblewrap` |
-  | rootless networking | `app-containers/slirp4netns` | `slirp4netns` |
-  | the fleet's cron jobs | `sys-process/cronie` | `cron` |
-  | systemd hosts only | `sys-apps/dbus` (user session) | `dbus-user-session` |
-  | tools | `dev-vcs/git`, `net-misc/curl`, `dev-lang/python` (3.12+) | `git`, `curl`, `python3` (3.12+) |
-
-- **Hardware:** more than 12 GB of free RAM while the OmniRoute image builds (its `next build`
-  reached 11.9 GB), and 20 GB of disk per instance.
+- **System:** Gentoo Linux with OpenRC 0.63 or newer.
+- **Packages:**
+  - `app-containers/docker`, version 29 or newer;
+  - `sys-apps/shadow`, for `newuidmap`;
+  - `sys-apps/bubblewrap`;
+  - `app-containers/slirp4netns`;
+  - `dev-vcs/git`;
+  - `net-misc/curl`;
+  - Python 3.12 or newer.
+- **Hardware:** about 8 GB of free RAM for the image builds, and 20 GB of disk per instance.
 
 `deploy/host-prep.sh` lists anything missing. With `--install-packages` it installs them through
-`emerge --noreplace` on Gentoo, or `apt-get` on Debian/Ubuntu (it adds Docker's apt repository
-first, because the distribution's `docker.io` is older than Docker 29).
+`emerge --noreplace`.
 
 ## 1. Prepare the host (root, once per instance)
 
@@ -50,8 +40,7 @@ Host prep does the following, and nothing else on the host:
 2. It assigns a subordinate uid and gid range.
 3. It installs Docker's static rootless extras (`rootlesskit`) for the host's Docker version under
    `/opt/omc/rootless-extras/`.
-4. It starts the user's own rootless Docker daemon as a user service: on OpenRC through
-   `user.omc-demo`, on systemd through the user's own systemd manager (`loginctl enable-linger`).
+4. It starts the user's own rootless Docker daemon as an OpenRC user service (`user.omc-demo`).
 5. It enables that service for future boots. No reboot is needed.
 
 ## 2. Install (as the instance user)
@@ -85,44 +74,10 @@ deploy/setup.sh            # resumable; deploy/setup.sh --step 3 runs one step
 | 2 | Log into the UI at `http://localhost:<FRONTEND_PORT>` with `LOCAL_AUTH_TOKEN` from `data/.env` | the token works |
 | 3 | Connect your LLM in OmniRoute (below) | OmniRoute lists the `omniroute-auto` combo |
 | 4 | — | the backend gets a completion through OmniRoute |
-| 5 | Register the required OpenClaw gateway; choose whether to install/configure optional coding harnesses ([harness setup](../harness/HARNESS-SETUP.md)) | a gateway is registered; optional harnesses may be skipped |
+| 5 | Install the OpenClaw gateway and register it under Gateways ([harness setup](../harness/HARNESS-SETUP.md)); boards need it | a gateway is registered |
 | 6 | Create your first board in the UI | a board exists |
-| 7 | — | enables the coding fleet only with a configured optional harness; otherwise disarms it while OpenClaw/PEV remains usable |
+| 7 | — | starts the team pool, review agent and cron jobs |
 | 8 | — | a smoke task on your board passes through OmniRoute |
-
-### Interactive component setup
-
-OpenClaw is **core**: every board needs its gateway. Pi and Claude Code are **optional** coding
-harnesses. Missing Pi does not prevent base setup or the built-in PEV smoke task from completing.
-
-As the instance user, run `deploy/setup.sh --components` at any time, including after step 5 was
-previously completed. It offers use-existing, install, configure, skip (optional components), and
-return-later choices. No external installer runs without your explicit install choice. Installers
-run as the instance user, never as root. Failed installs can be retried without resetting setup.
-
-For an attachable terminal (requires tmux), as `omc-demo`:
-
-```bash
-cd ~/omc
-tmux new-session -s omc-setup 'cd "$HOME/omc"; deploy/setup.sh --components; exec bash -l'
-```
-
-Detach with **Ctrl-b**, then **d**; reattach as that same user with `tmux attach -t omc-setup`.
-From a root terminal, use `su - omc-demo -c 'tmux attach -t omc-setup'`. Do not reuse or delete
-another existing session. The setup terminal is not a runtime service manager.
-
-Choosing Pi offers `curl -fsSL https://pi.dev/install.sh | sh`, then helps configure that user's
-`~/.pi/agent/models.json` and `settings.json` using this instance's OmniRoute and available models.
-Enter the actual context/output limits from your provider or model configuration; these fields
-are required and have no guessed defaults. Existing custom providers/settings are
-preserved; replacing a changed file requires confirmation and creates a mode-0600 backup. Secret
-input is hidden and credentials are not passed in process arguments. A tool-free, in-memory Pi
-request checks the actual CLI and model configuration. Optional plugins are not auto-installed.
-
-Choosing skip leaves base OpenClaw/PEV operation available. Re-run `deploy/setup.sh --step 7`
-after changing component choices: it rechecks availability even when previously marked done,
-and starts or disarms the optional coding services accordingly. Skipped harnesses are not
-reported as functioning. Do not create coding-fleet work until a coding harness is configured.
 
 ### Connecting your LLM (step 3)
 

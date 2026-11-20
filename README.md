@@ -23,14 +23,13 @@ which is now archived. This repo is its trunk.
 | Fleet layer | `scripts/` | Team pool and runner, watchdog, GitHub responder, backlog batching, intake, quota balancer, disk janitor |
 | Instance tooling | `deploy/` | host prep, install, guided setup and purge of isolated instances |
 | OmniRoute build | `omniroute/` | pinned upstream release plus the OMC patch |
-| Agent harnesses | `harness/` | core OpenClaw gateway plus optional Pi/Claude Code; `deploy/setup.sh --components` offers interactive install/configure/skip choices as the instance user |
+| Agent harnesses | `harness/` | templates and a setup guide for Pi, OpenClaw and Claude Code. Each is installed manually by whoever runs the instance |
 
 For how the pieces fit together, see [architecture](docs/architecture/README.md#fleet-autonomy-layer-2026-10-28).
 
 ## Install
 
-The installer targets Linux with rootless Docker and OpenRC (Gentoo, tested) or systemd (Debian 13+,
-supported but not yet tested on a real host). Each deployment is an
+The supported target is Gentoo Linux with OpenRC and rootless Docker. Each deployment is an
 isolated, named instance:
 - its own unprivileged user and home;
 - its own Docker daemon, ports and `data/` directory;

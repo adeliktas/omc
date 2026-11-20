@@ -66,6 +66,8 @@ def test_extract_config_last_touched_version_returns_none_without_config_meta_la
         ("2026.2.21-2", "2026.2.21-1", True),
         ("2026.2.21-1", "2026.2.21-2", False),
         ("2026.2.20", "2026.2.21", False),
+        ("2026.10.33", "2026.2.9", True),
+        ("2026.10.33", "2026.11.1", False),
     ],
 )
 def test_evaluate_gateway_version_compares_calver(

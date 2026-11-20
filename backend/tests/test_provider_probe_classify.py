@@ -145,3 +145,63 @@ def test_autorecover_executes_with_empty_provider_table(monkeypatch) -> None:
     monkeypatch.setattr(wl, "async_session_maker", lambda: _FakeCtx())
     flips = asyncio.run(wl._autorecover_providers())
     assert flips == 0
+
+
+def test_autorecover_mirrors_recovery_into_omniroute(monkeypatch) -> None:
+    """2026-10-30: the traffic gate switched a local model off in OmniRoute; the probe
+    recovered it in MC only, so OmniRoute kept rejecting every request."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import httpx
+
+    import app.api.provider_capacity as pc
+    import app.services.watchdog_loop as wl
+
+    row = SimpleNamespace(
+        provider_name="vllm", status="offline", base_url="http://10.0.0.5:8000/v1",
+        api_key=None, last_error="auto_gate: busy", max_concurrent=1, priority=0,
+    )
+
+    class _Result:
+        def scalars(self):
+            return SimpleNamespace(all=lambda: [row])
+
+    class _FakeDb:
+        async def execute(self, _stmt):
+            return _Result()
+
+        async def commit(self) -> None:
+            return None
+
+    class _FakeCtx:
+        async def __aenter__(self):
+            return _FakeDb()
+
+        async def __aexit__(self, *_exc) -> None:
+            return None
+
+    class _Client:
+        def __init__(self, **_kw) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc) -> None:
+            return None
+
+        async def get(self, url):
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+
+    synced: list[tuple] = []
+
+    async def _upsert(name, base_url, api_key, status, **kw):
+        synced.append((name, status, kw))
+
+    monkeypatch.setattr(wl, "async_session_maker", lambda: _FakeCtx())
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(pc, "_omniroute_sync_provider_upsert", _upsert)
+    assert asyncio.run(wl._autorecover_providers()) == 1
+    assert row.status == "online"
+    assert synced == [("vllm", "online", {"max_concurrent": 1, "priority": 0})]

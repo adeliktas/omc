@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 # Guided setup of this OMC instance, step by step. Run as the instance user after deploy/install.sh.
 # Resumable: finished steps are remembered in data/state/setup-done and skipped.
-# usage: deploy/setup.sh [--step N] [--show-token] [--components]
+# usage: deploy/setup.sh [--step N] [--show-token]
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 home=$(dirname "$here")
 data=$home/data
-export PATH="$HOME/.local/bin:$HOME/.local/node/bin:$HOME/.pi/agent/bin:$PATH"
-only="" show=0 components=0
+only="" show=0
 while [ $# -gt 0 ]; do
   case $1 in
     --step) only=$2; shift ;;
     --show-token) show=1 ;;
-    --components) components=1 ;;
-    *) echo "usage: deploy/setup.sh [--step N] [--show-token] [--components]" >&2; exit 2 ;;
+    *) echo "usage: deploy/setup.sh [--step N] [--show-token]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -26,13 +24,11 @@ export DOCKER_HOST=${DOCKER_HOST:-unix:///run/user/$(id -u)/docker.sock}
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 done_file=$data/state/setup-done
 mkdir -p "$data/state" && touch "$done_file"
-[ "$components" = 0 ] || exec python3 "$here/components.py"
 
 api() { curl -fsS -H "Authorization: Bearer $LOCAL_AUTH_TOKEN" -H "Content-Type: application/json" "$@"; }
 items() { python3 -c 'import json, sys; d = json.load(sys.stdin); d = d.get("items", d.get("data", [])) if isinstance(d, dict) else d; print("\n".join(str(x.get("id", "")) for x in d))'; }  # MC pages or OpenAI lists
 show_url() { echo "  -> $1"; if [ -n "${DISPLAY:-}" ] && command -v xdg-open >/dev/null; then xdg-open "$1" >/dev/null 2>&1 || true; fi; }
 ask() { local a=""; [ -t 0 ] && read -rp "  $1" a; echo "$a"; }
-ask_secret() { local a=""; if [ -t 0 ]; then read -rsp "$1" a; echo >&2; fi; printf '%s' "$a"; }
 set_env() { # <key> <value>: replace or append in data/.env
   grep -q "^$1=" "$data/.env" && sed -i "s|^$1=.*|$1=$2|" "$data/.env" || echo "$1=$2" >> "$data/.env"
 }
@@ -73,7 +69,7 @@ for m in json.load(sys.stdin).get("data", []):
     print("    model %s  context %s" % (m.get("id"), m.get("max_model_len") or m.get("context_length") or "?"))' ||
       echo "    could not list $url/models"
   fi
-  key=$(ask_secret "OmniRoute API key for Mission Control (hidden; blank keeps the current one): ")
+  key=$(ask "OmniRoute API key for Mission Control (blank keeps the current one): ")
   if [ -n "$key" ]; then
     set_env OMNIROUTE_RUNTIME_KEY "$key"
     (cd "$home" && docker compose up -d backend webhook-worker >/dev/null 2>&1)
@@ -106,7 +102,6 @@ info_5() {
   echo "  Pi and Claude Code are optional coding harnesses, described in the same file."
   for c in openclaw pi claude; do echo "    $c: $(command -v $c || echo 'not installed')"; done
   show_url "$UI/gateways"
-  if [ -t 0 ]; then python3 "$here/components.py"; fi
 }
 check_5() {
   [ -n "$(api "$MC/api/v1/gateways" | items)" ] || { echo "  no gateway registered yet"; return 1; }
@@ -121,19 +116,9 @@ info_7() { echo "  Starts the fleet: the team pool and review agent (user servic
 check_7() {
   crontab "$data/etc/crontab" || return 1
   local s
-  if ! python3 "$here/components.py" --fleet-ready; then
-    sed -i 's/^RUNNER_APPLY=.*/RUNNER_APPLY=0/' "$data/etc/fleet.env"
-    for s in mc-team-pool mc-review-agent; do
-      if omc_svc status "$s" >/dev/null 2>&1; then omc_svc stop "$s" || return 1; fi
-      omc_svc disable "$s" >/dev/null 2>&1 || true
-    done
-    echo "  No configured optional coding harness: fleet disarmed; OpenClaw/PEV remains available."
-    return 0
-  fi
-  sed -i 's/^RUNNER_APPLY=.*/RUNNER_APPLY=1/' "$data/etc/fleet.env"
   for s in mc-team-pool mc-review-agent; do
-    omc_svc enable "$s" >/dev/null 2>&1
-    omc_svc status "$s" >/dev/null 2>&1 || omc_svc start "$s" >/dev/null 2>&1
+    rc-update -U add "$s" default >/dev/null 2>&1
+    rc-service -U "$s" status >/dev/null 2>&1 || rc-service -U "$s" start >/dev/null 2>&1
   done
   sleep 3
   pgrep -u "$(id -u)" -f "scripts/mc-team-pool.py" >/dev/null || { echo "  the pool is not running (see $data/log/mc-claude-runner.log)"; return 1; }
@@ -163,11 +148,11 @@ titles=("" "Stack is up" "Log into Mission Control" "Connect your LLM in OmniRou
   "OpenClaw gateway" "First board" "Start the fleet" "Smoke task")
 run_step() {
   local n=$1 a
-  if [ "$n" != 7 ] && grep -qx "$n" "$done_file"; then echo "[$n] ${titles[$n]}: already done"; return 0; fi
+  if grep -qx "$n" "$done_file"; then echo "[$n] ${titles[$n]}: already done"; return 0; fi
   echo; echo "[$n] ${titles[$n]}"
-  "info_$n" || return 1
+  "info_$n"
   while true; do
-    if "check_$n"; then grep -qx "$n" "$done_file" || echo "$n" >> "$done_file"; echo "  ok"; return 0; fi
+    if "check_$n"; then echo "$n" >> "$done_file"; echo "  ok"; return 0; fi
     [ -t 0 ] || return 1
     read -rp "  [c]heck again / [s]kip / [q]uit: " a || return 1  # input closed
     case $a in s) return 0 ;; q) exit 0 ;; esac

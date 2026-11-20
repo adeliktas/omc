@@ -162,3 +162,23 @@ def test_split_dependency_stacks_its_child_task_branches(tmp_path):
     r.api=api
     refs=r.dependency_branches({"depends_on_task_ids":["pppp0000-0000"]})
     assert refs==["origin/omc/c1111111-00000000","origin/omc/c2222222-00000000"]
+
+
+def test_a_named_pr_branch_is_stacked_like_a_dependency(tmp_path):
+    # 2026-11-04: fleet tasks fix a human's unmerged PR, so they must start from its branch.
+    spec=importlib.util.spec_from_file_location('named_stack_runner',ROOT/'scripts/mc-team-runner.py')
+    r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r)
+    origin,clone=tmp_path/"origin",tmp_path/"clone"
+    run=lambda *a,cwd=None:subprocess.run(["git",*a],cwd=cwd,check=True,capture_output=True,env={**r.os.environ,**r.identity("t")})
+    run("init","-q","-b","main",str(origin))
+    (origin/"a").write_text("a");run("add","a",cwd=origin);run("commit","-qm","a",cwd=origin)
+    run("checkout","-qb","feat/x-full",cwd=origin)
+    (origin/"pr").write_text("pr");run("add","pr",cwd=origin);run("commit","-qm","pr",cwd=origin)
+    run("checkout","-q","main",cwd=origin)
+    run("clone","-q",str(origin),str(clone))
+    r.REPO=clone
+    r.api=lambda *a,**k:{"items":[]}
+    part="Fix it.\n\n## Parent task\n\nBuilds on branch: feat/x-full\nBuilds on branch: feat/gone"
+    assert r.dependency_branches({"description":part})==["origin/feat/x-full"]  # a missing branch is skipped
+    assert r.dependency_branches({"description":"Builds on branch: x; rm -rf /"})==[]  # names only
+    assert r.dependency_branches({})==[]

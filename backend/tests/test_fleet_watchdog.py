@@ -290,6 +290,79 @@ def test_no_progress_skips_work_that_waits_only_on_a_pending_owner_decision(monk
     assert stalled()  # with no decision pending the same board is a stall
 
 
+def test_a_drained_idle_board_reruns_opus_only_on_new_evidence(monkeypatch, tmp_path):
+    # 2026-10-30: the board and the intake were drained; run 2 re-read the evidence run 1 had 15 min
+    # earlier, and a 6h retry would have come before the next intake.
+    spec = importlib.util.spec_from_file_location("fleet_watchdog_drained", SCRIPT)
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    now = datetime.now(timezone.utc)
+    (tmp_path / "pool.log").write_text("")
+    (tmp_path / "boards.json").write_text(json.dumps({"b" * 36: "/repo"}))
+    (tmp_path / "runs").mkdir()
+    batch, intake_log, intake_state = tmp_path / "batch.log", tmp_path / "intake.log", tmp_path / "intake.json"
+    batch.write_text("no unreferenced open omc-fleet issues; fleet backlog drained\n")
+    intake_log.write_text("intake 1 done\n")
+    os.utime(intake_log, (now.timestamp() - 7200,) * 2)
+    intake_state.write_text(json.dumps({"last_ok": (now - timedelta(hours=3)).isoformat(),
+                                        "last_try": (now - timedelta(hours=3)).isoformat()}))
+    for name, value in {"POOL_LOG": tmp_path / "pool.log", "BOARDS": tmp_path / "boards.json", "RUNS": tmp_path / "runs",
+                        "BATCH_LOG": batch, "INTAKE_LOG": intake_log, "INTAKE_STATE": intake_state,
+                        "STATE": tmp_path / "state.json"}.items():
+        monkeypatch.setattr(w, name, value)
+    monkeypatch.setattr(w, "codex_exhausted", lambda: False)
+    monkeypatch.setattr(w.urllib.request, "urlopen", lambda *a, **k: None)
+    attempt = (now - timedelta(hours=4)).replace(tzinfo=None).isoformat(sep=" ")
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, *a, **k: type("R", (), {
+        "stdout": f"{attempt}|1\n" if "max(created_at), 1 from team_attempts" in cmd[-1] else " * status: started"})())
+    monkeypatch.setattr(w.runpy, "run_path", lambda path: {"request": lambda method, path: []})
+    idle = lambda: [f for f in w.findings() if f.startswith("board bbbbbbbb: idle")]
+    [finding] = idle()
+    assert not finding.endswith(w.UNCHANGED)  # first sight of the drained board: a run looks at it
+    run = tmp_path / "runs" / f"20261030T025001-{w.fingerprint(finding)}.json"
+    run.write_text("{}")
+    os.utime(run, (now.timestamp() - 3600,) * 2)
+    assert idle() == [finding + w.UNCHANGED]  # same evidence: held
+    os.utime(intake_log, (now.timestamp() - 60,) * 2)  # the intake ran (or retried, or failed) since that run
+    # 2026-10-31: a re-sync re-queued issues, and run 2 fired 3 s before next-batch's tick seeded them.
+    os.utime(batch, (now.timestamp() - 120,) * 2)
+    assert idle() == [finding + w.UNCHANGED]  # next-batch has not turned the intake's news into work yet
+    os.utime(batch, (now.timestamp() - 30,) * 2)
+    assert idle() == [finding]
+    os.utime(intake_log, (now.timestamp() - 7200,) * 2)
+    intake_state.write_text(json.dumps({"last_try": (now - timedelta(hours=14)).isoformat()}))
+    assert not idle()[0].endswith(w.UNCHANGED)  # an overdue intake is no wait
+    intake_state.write_text(json.dumps({"last_try": (now - timedelta(hours=3)).isoformat()}))
+    # 2026-10-30 11:45: an interactive session held the local model's only slot. The pull cleared last_try
+    # and retried every 15 min, and each retry's log lines would have bought another Opus run.
+    intake_state.write_text(json.dumps({"last_ok": (now - timedelta(hours=12)).isoformat()}))
+    intake_log.write_text("intake 2: the local model stopped answering confluence, jira; retrying on the next tick\n")
+    assert idle()[0].endswith(w.UNCHANGED)  # a retry on the busy slot is no new evidence
+    intake_state.write_text(json.dumps({"last_ok": (now - timedelta(hours=37)).isoformat()}))
+    assert not idle()[0].endswith(w.UNCHANGED)  # busy for over a day: look at the slot's holder
+    intake_state.write_text(json.dumps({"last_try": (now - timedelta(hours=3)).isoformat()}))
+    batch.write_text("seeded lead 12345678 with 3 open issues\n")
+    assert not idle()[0].endswith(w.UNCHANGED)  # work exists and nothing runs it
+    # 2026-10-31: during a host outage next-batch logged "cannot reach" MC. One run looked at it together with
+    # the outage findings; 10 min later run 2 re-read the same line, 2 s before the next tick replaced it.
+    batch.write_text("mc: cannot reach http://127.0.0.1:8000: timed out (set MC_URL)\n")
+    os.utime(batch, (now.timestamp() - 900,) * 2)
+    [failed] = idle()
+    assert not failed.endswith(w.UNCHANGED)  # no run has seen next-batch fail yet
+    w.STATE.write_text(json.dumps({"seen": {w.fingerprint(failed): now.timestamp() - 600}}))  # a combined run did
+    assert idle() == [failed + w.UNCHANGED]
+    os.utime(batch, (now.timestamp() - 30,) * 2)  # next-batch failed again since that run
+    assert idle() == [failed]
+    # A held finding spends no try and stays visible in the log.
+    w2 = _loaded(monkeypatch, tmp_path, "fleet_watchdog_drained_main")
+    monkeypatch.setattr(w2, "findings", lambda: [finding + w2.UNCHANGED])
+    monkeypatch.setattr(w2, "outcomes", lambda: [])
+    monkeypatch.setattr(w2, "settle_alerts", lambda found: None)
+    monkeypatch.setattr(w2.subprocess, "run", lambda *a, **k: pytest.fail("no Opus run on unchanged evidence"))
+    w2.main()
+    assert "held (" in w2.LOG.read_text() and w2.UNCHANGED in w2.LOG.read_text()
+
+
 def test_opus_tries_count_per_finding_however_the_other_findings_change(monkeypatch, tmp_path):
     # 2026-10-24: tries were keyed on the whole finding set, so two tasks waiting on a human
     # merge went to Opus three times (06:00, 06:20, 06:40) as the set shrank from 5 to 2.
@@ -326,10 +399,30 @@ def test_opus_tries_count_per_finding_however_the_other_findings_change(monkeypa
     old = time.time() - w.RETRY_AFTER - 1
     assert check([a, d], last={w.fingerprint(a): old, w.fingerprint(d): time.time()}) == [a, d]  # a retried later
     assert "find the structural cause now, or ESCALATE" in prompts[0]
+    # Every finding a run saw is recorded, also from a combined run named after the whole set.
+    assert set(json.loads(w.STATE.read_text())["seen"]) == {w.fingerprint(a), w.fingerprint(d)}
     assert check([]) == [] and check([a]) == [a]  # a cleared finding that returns starts over
     # State from before per-finding tries kept one key for the whole set: it carries over.
     w.STATE.write_text(json.dumps({"step": 0, "next": 0, "tries": {w.fingerprint(f"{a}\n{b}"): 2}}))
     assert check([a, b]) == []
+
+
+def test_a_held_finding_keeps_the_seen_mark_of_the_combined_run_that_saw_it(monkeypatch, tmp_path):
+    # 2026-11-04: the 03:00 run saw [idle, intake failed] together; the 03:20 tick held idle with the UNCHANGED
+    # suffix, whose fingerprint differs, so main() pruned idle's seen mark and 03:40 re-ran Opus on the same evidence.
+    spec = importlib.util.spec_from_file_location("fleet_watchdog_held_seen", SCRIPT)
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    for name in ("STATE", "LOG"):
+        monkeypatch.setattr(w, name, tmp_path / name)
+    monkeypatch.setattr(w, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(w, "outcomes", lambda: [])
+    monkeypatch.setattr(w, "settle_alerts", lambda found: None)
+    idle = "board 0b0a0d00: idle 96h with free engines (0 owner decisions pending)"
+    monkeypatch.setattr(w, "findings", lambda: [idle + w.UNCHANGED])
+    w.STATE.write_text(json.dumps({"step": 0, "next": 0, "tries": {}, "seen": {w.fingerprint(idle): 1.0}}))
+    w.main()
+    assert json.loads(w.STATE.read_text())["seen"] == {w.fingerprint(idle): 1.0}
 
 
 def test_only_a_models_escalation_reaches_the_owner_and_the_choice_is_carried_out(monkeypatch, tmp_path):
@@ -686,42 +779,23 @@ def test_a_task_decision_never_parks_an_idle_board(monkeypatch, tmp_path):
     assert len(prompts) == 1
 
 
-def _watchdog():
-    spec = importlib.util.spec_from_file_location("fleet_watchdog", SCRIPT)
+def test_a_plain_task_nothing_runs_is_a_finding(monkeypatch, tmp_path):
+    # 2026-11-05: an owner's UI task (single mode, lead lane) sat 2 days in the inbox; the
+    # pool runs only team tasks and the private-board lead is held, and no check looked at it.
+    spec = importlib.util.spec_from_file_location("fleet_watchdog_plain", SCRIPT)
     w = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(w)
-    return w
-
-
-def test_an_instance_checks_its_own_ports(monkeypatch):
-    w = _watchdog()
-    monkeypatch.setenv("BACKEND_PORT", "13001")
-    monkeypatch.setenv("FRONTEND_PORT", "13000")
-    urls = []
-    monkeypatch.setattr(w.urllib.request, "urlopen", lambda url, **k: urls.append(url))
-    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: None)
-    monkeypatch.setattr(w.runpy, "run_path", lambda path: (_ for _ in ()).throw(OSError("down")))
-    w.findings()
-    assert urls == ["http://127.0.0.1:13001/health", "http://127.0.0.1:13000/"]
-
-
-def test_the_pool_check_asks_the_right_service_manager(monkeypatch):
-    w = _watchdog()
-    calls = []
-
-    def run(cmd, **kw):
-        calls.append((cmd, kw.get("env", {}).get("XDG_RUNTIME_DIR")))
-        return type("R", (), {"stdout": " * status: started", "returncode": 0})()
-
-    monkeypatch.setattr(w.subprocess, "run", run)
-    monkeypatch.delenv("OMC_DATA", raising=False)
-    assert w.pool_started() and calls[-1][0] == ["rc-service", "mc-team-pool", "status"]  # production
-    monkeypatch.setenv("OMC_DATA", "/home/omc-x/omc/data")
-    monkeypatch.setenv("RUNNER_APPLY", "0")
-    calls.clear()
-    assert w.pool_started() and calls == []  # a disarmed instance stops its pool on purpose
-    monkeypatch.setenv("RUNNER_APPLY", "1")
-    assert w.pool_started()
-    cmd, runtime = calls[-1]
-    assert cmd in (["rc-service", "-U", "mc-team-pool", "status"], ["systemctl", "--user", "is-active", "--quiet", "mc-team-pool"])
-    assert runtime == f"/run/user/{os.getuid()}"
+    (tmp_path / "pool.log").write_text("")
+    monkeypatch.setattr(w, "POOL_LOG", tmp_path / "pool.log")
+    monkeypatch.setattr(w, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(w, "BOARDS", tmp_path / "none.json")
+    monkeypatch.setattr(w, "META_BOARD", "m" * 36)
+    monkeypatch.setattr(w, "codex_exhausted", lambda: False)
+    monkeypatch.setattr(w.urllib.request, "urlopen", lambda *a, **k: None)
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": " * status: started"})())
+    old = (datetime.now(timezone.utc) - timedelta(hours=45)).isoformat()
+    tasks = [{"id": "s" * 36, "status": "inbox", "execution_mode": "single", "title": "status check", "updated_at": old}]
+    monkeypatch.setattr(w.runpy, "run_path", lambda path: {"request": lambda method, path: tasks})
+    assert any("task ssssssss is not a team task" in f for f in w.findings())
+    tasks[0]["updated_at"] = datetime.now(timezone.utc).isoformat()  # a lead may still pick up a fresh one
+    assert not any("not a team task" in f for f in w.findings())

@@ -51,7 +51,10 @@ export async function createPrivateSession(spec, options = {}) {
     AUTH_MODE: 'local', LOCAL_AUTH_TOKEN: randomBytes(32).toString('hex'),
     BASE_URL: 'http://localhost:8000', // synthetic app-import token; no deployment accepts it
     // /proc is masked, so a trimmed Go binary cannot locate its own root; builds stay offline.
-    GOROOT: '/usr/lib/go', GOPROXY: 'off', GOFLAGS: '-mod=mod', GOTOOLCHAIN: 'local',
+    // --clearenv drops HOME, so name the host's read-only GOPATH (module cache + sumdb). The cache
+    // doubles as an offline file proxy: cached `go run tool@vX` and GOTOOLCHAIN=goX switches work.
+    GOROOT: '/usr/lib/go', GOPATH: `${homedir()}/go`, GOMODCACHE: `${homedir()}/go/pkg/mod`,
+    GOPROXY: `file://${homedir()}/go/pkg/mod/cache/download`, GOFLAGS: '-mod=mod', GOTOOLCHAIN: 'local',
     GOCACHE: '/tmp/.cache/go-build' };
   for (const [key, value] of Object.entries(env)) argv.push('--setenv', key, value);
   argv.push('--chdir', cwd, '--', '/bin/bash', '--noprofile', '--norc', '-c');

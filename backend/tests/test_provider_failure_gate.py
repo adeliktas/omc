@@ -25,11 +25,13 @@ def flows_db(tmp_path: Path, monkeypatch) -> Path:
     return db
 
 
-def _flow(db: Path, model: str, status: int, ts: str = "2100-01-01T00:00:00") -> None:
+def _flow(
+    db: Path, model: str, status: int, ts: str = "2100-01-01T00:00:00", reason: str = ""
+) -> None:
     conn = sqlite3.connect(db)
     conn.execute(
         "INSERT INTO flows (ts, model, status_code, finish_reason) VALUES (?,?,?,?)",
-        (ts, model, status, "" if status < 400 else "boom"),
+        (ts, model, status, reason or ("" if status < 400 else "boom")),
     )
     conn.commit()
     conn.close()
@@ -52,6 +54,37 @@ def test_failure_rates_and_gate_decision(flows_db):
     assert gate.gate_decision("vllm", rates)[0] is False
     # unknown provider not gated
     assert gate.gate_decision("nope", rates)[0] is False
+
+
+SEMAPHORE = "Semaphore timeout after 30000ms for openai-compatible-chat-0"
+
+
+def test_busy_single_slot_that_still_serves_is_not_gated(flows_db):
+    # 2026-10-30: one long session held the only slot; other callers' queue timeouts gated it.
+    for _ in range(11):
+        _flow(flows_db, "vllm/Qwen3.8-27B-FP8", 200)
+    for _ in range(27):
+        _flow(flows_db, "vllm/Qwen3.8-27B-FP8", 429, reason=SEMAPHORE)
+    rates = gate.provider_failure_rates()
+    assert rates["vllm"]["error_pct"] == 0.0
+    assert gate.gate_decision("vllm", rates)[0] is False
+
+
+def test_queue_timeouts_with_no_success_still_gate(flows_db):
+    for _ in range(12):  # hung server: nothing completes
+        _flow(flows_db, "llamacpp/x", 429, reason=SEMAPHORE)
+    assert gate.gate_decision("llamacpp", gate.provider_failure_rates())[0] is True
+
+
+def test_real_errors_still_count_beside_queue_timeouts(flows_db):
+    _flow(flows_db, "vllm/x", 200)
+    for _ in range(20):
+        _flow(flows_db, "vllm/x", 429, reason=SEMAPHORE)
+    for _ in range(12):
+        _flow(flows_db, "vllm/x", 500)
+    rates = gate.provider_failure_rates()
+    assert rates["vllm"]["total"] == 13 and rates["vllm"]["errors"] == 12
+    assert gate.gate_decision("vllm", rates)[0] is True
 
 
 def test_min_flows_threshold(flows_db):

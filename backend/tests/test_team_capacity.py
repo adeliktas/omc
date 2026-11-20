@@ -307,7 +307,10 @@ async def test_held_owner_pinned_pm_drafts_the_plan_locally_but_qa_and_leads_nev
 
 
 @pytest.mark.parametrize("error", ["interrupted: attempt time limit reached; partial output discarded",
-                                   "Connection error."])
+                                   "Connection error.",
+                                   # 2026-11-04: strata unreachable over WireGuard, metis at 16k context
+                                   "Request timed out.", "empty model reply",
+                                   "400: {\"message\":\"This model's maximum context length is 16384 tokens.\"}"])
 async def test_a_timed_out_local_draft_waits_for_the_frontier_engine_instead_of_blocking(env, error):
     from tests.test_team_cycle import entry
     s, board, task = env
@@ -378,7 +381,10 @@ async def test_a_stored_local_draft_engine_is_still_a_draft_at_claim_time(env, h
     await svc.complete_attempt(s, board, cycle, pm, tok, ok=False, ranking=held,
                                error="worker perf-harness needs 1..10 safe relative scope paths")
     retry = (await svc._attempts(s, cycle.id))[-1]
-    assert (retry.attempt_no, retry.status, retry.provider) == (2, "queued", "metis")
+    assert (retry.attempt_no, retry.status, retry.provider) == (2, "queued", "claude-code")  # one local try
+    # A skipped claim pass can still store a local engine on the row.
+    retry.provider, retry.model = "metis", "qwen3.8"
+    retry.assignment = json.dumps({**json.loads(retry.assignment), "no_local": False})
     free = {**held, "levels": [{"entries": [entry("claude-code", "sonnet"), local]}]}
     again, _ = await svc.claim_next(s, cycle, base_sha=BASE, ranking=free if hold_ended else held)
     assert (again.id, again.provider) == (retry.id, "claude-code" if hold_ended else "metis")
